@@ -94,13 +94,45 @@ body {
 .vehicle-demo__credits a { color: #91a0af; text-decoration: none; }
 .vehicle-demo__credits a:hover { color: #526c86; text-decoration: underline; }
 
+.vehicle-demo__voice {
+  position: absolute;
+  left: clamp(22px, 4vw, 58px);
+  bottom: clamp(64px, 9vh, 96px);
+  width: min(310px, calc(100% - 2rem));
+  max-height: calc(100% - 150px);
+  overflow-y: auto;
+  border-radius: 18px;
+}
+
+.vehicle-demo__voice .voice-panel {
+  padding: 18px;
+  color: #243549;
+  background: rgb(255 255 255 / 78%);
+  border: 1px solid #ffffffd9;
+  box-shadow: 0 10px 35px #30486212;
+}
+.vehicle-demo__voice .voice-panel__mic { stroke: #327b9c; }
+.vehicle-demo__voice .voice-panel__title span,
+.vehicle-demo__voice .voice-panel__privacy { color: #718195; }
+.vehicle-demo__voice .voice-panel button { color: #42617e; border-color: #cedce8; background: #f0f4f8a6; }
+.vehicle-demo__voice .voice-panel button:hover { background: #e1eff7; }
+.vehicle-demo__voice .voice-panel button:focus-visible { outline-color: #327b9c; }
+.vehicle-demo__voice .voice-panel__toggle,
+.vehicle-demo__voice .voice-panel__actions button:first-child { color: #256582; border-color: #78a9bf; }
+.vehicle-demo__voice .voice-panel__transcript,
+.vehicle-demo__voice .voice-panel__feedback { color: #526c86; }
+.vehicle-demo__voice .voice-panel__example { border-color: #dce5ed; }
+.vehicle-demo__voice .voice-panel[data-phase="error"] .voice-panel__message { color: #a54d28; }
+
 @media (max-width: 800px) {
   .vehicle-demo__panel { top: auto; bottom: 1.2rem; right: 1rem; transform: none; }
   .vehicle-demo__hud { left: 1rem; transform: none; }
+  .vehicle-demo__voice { left: 1rem; top: 6rem; bottom: auto; max-height: calc(100% - 8rem); }
 }
 
 @media (max-width: 560px) {
   .vehicle-demo__hud { top: 4.5rem; bottom: auto; }
   .vehicle-demo__panel { right: 1rem; left: 1rem; }
   .vehicle-demo__panel .part-panel { margin-left: auto; }
+  .vehicle-demo__voice { max-height: 40vh; }
 }

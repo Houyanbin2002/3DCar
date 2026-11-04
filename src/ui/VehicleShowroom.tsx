@@ -3,6 +3,7 @@ import type { PartId, VehicleSceneDriver } from '../contracts/vehicle';
 import { Showroom } from '../scene/Showroom';
 import { createVehicleController } from '../vehicle/vehicleController';
 import { PartPanel } from './PartPanel';
+import { VoicePanel } from './VoicePanel';
 import './vehicle-showroom.css';
 
 export function VehicleShowroom() {
@@ -27,6 +28,7 @@ export function VehicleShowroom() {
         <p>3D 交互展厅</p>
       </header>
       <div className="vehicle-demo__panel"><PartPanel controller={controller} /></div>
+      <div className="vehicle-demo__voice"><VoicePanel controller={controller} /></div>
       <div className="vehicle-demo__hud">
         <span>拖动旋转 <span aria-hidden="true">·</span> 滚轮缩放</span>
         <button type="button" disabled={!ready} onClick={() => driver.current?.resetView()}>

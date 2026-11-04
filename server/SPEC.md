@@ -4,7 +4,7 @@
 | --- | --- |
 | 版本与日期 | v1.3，2026-11-04 |
 | 分支与工作区 | `codex/intent-api`，`3DCar-intent-api` |
-| 需求依据 | 需求 v1.5 的 §4.4、§5、A13–A19，架构 v1.4 的 §4.3、§5（由语音分支更新，合并时同步） |
+| 需求依据 | 需求 v1.5 的 §4.4、§5、A13–A19，架构 v1.4 的 §4.3、§5 |
 | 公共契约 | `shared/control.ts` 与兼容的 `shared/intent.ts` |
 | 本分支路径 | `server/**` |
 | 运行方式 | Cloudflare Worker 接受 HTTPS 请求，单个 Durable Object 原子预留调用额度 |
