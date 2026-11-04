@@ -30,7 +30,22 @@ export interface ControlRequest {
   text: string;
   tools: ToolDefinition[];
   context: Record<string, unknown>;
+  dialogue?: DialogueMessage[];
   history?: ToolExchange[];
+}
+
+export interface DialogueMessage { role: 'user' | 'assistant'; content: string }
+
+export function validDialogue(value: unknown): value is DialogueMessage[] {
+  if (!Array.isArray(value) || value.length > 12 || value.length % 2 !== 0) return false;
+  let length = 0;
+  return value.every((message, index) => {
+    if (!isRecord(message) || Object.keys(message).length !== 2
+      || message.role !== (index % 2 === 0 ? 'user' : 'assistant')
+      || typeof message.content !== 'string' || !message.content.trim() || message.content.length > 1000) return false;
+    length += message.content.length;
+    return length <= 6000;
+  });
 }
 
 export interface ControlResponse {

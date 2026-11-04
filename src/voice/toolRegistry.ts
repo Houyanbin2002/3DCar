@@ -1,6 +1,6 @@
 import type { ControlResponse, ToolArguments, ToolCall, ToolDefinition, ToolEffect, ToolExecutionResult } from '../../shared/control';
 import { validControlResponse, validToolArguments, validToolDefinitions } from '../../shared/control';
-import { PART_IDS } from '../contracts/vehicle';
+import { PART_IDS, WINDOW_IDS } from '../contracts/vehicle';
 import type { VehicleAction, VehicleController } from '../contracts/vehicle';
 import { describeAction, describeResult, PART_LABELS } from './parseCommand';
 
@@ -112,6 +112,27 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
     },
   });
 
+  registry.register({
+    definition: {
+      type: 'function',
+      function: {
+        name: 'set_window_openness',
+        description: '设置指定车窗的绝对开度。0=完全关闭，0.25=打开一点，0.5=打开一半，1=完全打开；重复请求保持同一位置。all 表示全部四窗，仅在用户明确要求全部时使用。',
+        parameters: {
+          type: 'object', additionalProperties: false, required: ['target', 'openness'],
+          properties: {
+            target: { type: 'string', enum: [...WINDOW_IDS, 'all'] },
+            openness: { type: 'number', minimum: 0, maximum: 1 },
+          },
+        },
+      },
+    },
+    confirmation: 'always', idempotent: true,
+    context: () => Object.fromEntries(WINDOW_IDS.map((id) => [id, controller.getSnapshot().parts[id]])),
+    prepare: (args) => prepareAction(args.target === 'all'
+      ? { kind: 'group', group: 'windows', open: Number(args.openness) > 0, openness: args.openness as number }
+      : { kind: 'part', partId: args.target as typeof WINDOW_IDS[number], open: Number(args.openness) > 0, openness: args.openness as number }),
+  });
   registry.register({
     definition: {
       type: 'function',

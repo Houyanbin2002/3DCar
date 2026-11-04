@@ -7,6 +7,16 @@ export interface QuotaNamespace {
   getByName(name: string): { fetch(request: Request): Promise<Response> };
 }
 
+export async function reserveQuota(request: Request, namespace: QuotaNamespace, bucket = 'global'): Promise<Response> {
+  const day = new Date().toISOString().slice(0, 10);
+  const address = request.headers.get('CF-Connecting-IP') ?? 'local';
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${day}:${address}`));
+  const clientKey = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return namespace.getByName(bucket).fetch(new Request('https://quota/reserve', {
+    method: 'POST', body: JSON.stringify({ clientKey }),
+  }));
+}
+
 interface QuotaState {
   day: string;
   used: number;

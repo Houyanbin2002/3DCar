@@ -27,13 +27,19 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8787/api/intent' `
 
 ## 服务端配置
 
+同一 Worker 另外提供 `GET /api/speech` WebSocket 识别代理。默认模型为 `qwen-audio-3.1-asr-flash-message`，服务端配置中文与车辆热词，接收 16 kHz 单声道 PCM16。前端使用 AudioWorklet 采集音频，默认由 `VITE_INTENT_API_URL` 推导同域的 `/api/speech` 地址；可通过 `VITE_SPEECH_API_URL` 覆盖，线上需 WSS。麦克风采集需 HTTPS 或本机地址。
+
+`ASR_MODEL` 可覆盖模型名，`ASR_API_URL` 默认 `wss://dashscope.aliyuncs.com/api-ws/v1/inference/`，地域需与 Key 匹配。`ASR_API_KEY` 为可选后端 Secret，缺省复用 `MODEL_API_KEY`。前端不配置这些密钥。协议遵循 [千问实时识别说明](https://help.aliyun.com/en/model-studio/real-time-speech-recognition-user-guide)。
+
+识别和模型各使用独立的配额桶，沿用下表的分钟及日限制；识别按每次连接计数，每会话最多 120 秒，音频帧和发送速率有上限。服务端验证 Origin 后才预留额度及调用识别服务，客户端不能更改模型、热词或提供商指令。关闭语音会停止采集并断开两侧连接。Worker 显式设置二进制帧类型以适配当前运行时。[Workers WebSocket 说明](https://developers.cloudflare.com/workers/runtime-apis/websockets/)
+
 | 配置 | 用途与默认值 |
 | --- | --- |
 | `MODEL_API_URL` | 服务商的完整 HTTPS Chat Completions 地址。接口使用 Bearer 鉴权，支持标准 `tool_calls`、`role: tool` 和文本回复；旧分类链路使用 JSON 输出。 |
 | `MODEL_NAME` | 本项目选用 `qwen3.8-omni-flash`。服务端对该模型附加 `modalities: ["text"]` 与 `reasoning_effort: "none"`，用于低延迟的单轮意图判定。 |
 | `MODEL_API_KEY` | 部署平台 Secret。本地使用被 Git 忽略的 `.env.local`，生产环境使用 Wrangler Secret。 |
 | `ALLOWED_ORIGINS` | 逗号分隔的完整来源。默认配置只列出两个本地开发来源。发布时配置实际的 `https://用户名.github.io`，按需要保留开发来源。 |
-| `CLIENT_REQUESTS_PER_MINUTE` | 每客户端每 60 秒可预留的请求数，默认 5，范围 1–1000。 |
+| `CLIENT_REQUESTS_PER_MINUTE` | 每客户端每 60 秒可预留的请求数，演示配置 20，未配置时为 5，范围 1–1000。 |
 | `DAILY_REQUEST_LIMIT` | 全站每 UTC 日可预留的请求数，默认 100，范围 1–10000。 |
 | `MODEL_TIMEOUT_MS` | 上游请求与响应读取的总等待上限，默认 8000 ms，范围 1–30000 ms。 |
 
@@ -51,6 +57,8 @@ Qwen Omni 的文本输出、JSON 模式及思考参数依据阿里云官方说�
 首次本地测试可以先用自动化测试里的模型替身验证业务行为。实际中文分类效果、服务商兼容性和线上网络延迟，通过有效模型凭据和正式部署环境验收。
 
 ## 接口与故障
+
+连续对话通过可选 `dialogue: [{ role: "user" | "assistant", content }]` 传入过去完整问答。按 user/assistant 交替，最多 12 条、每条 1000 字符、总计 6000 字符。服务端校验后将其置于当前转写之前，模型可以根据短答继续追问或选择工具。每次仍传当前工具状态，结果摘要由页面纳入后续对话。与执行回执 `history` 分别校验，不影响原有最多一轮的失败项重试。
 
 `POST /api/intent` 接收带 `text`、`tools`、`context` 的新请求，返回 `toolCalls` 与 `reply`。工具定义由页面注册表动态生成，最多 16 项，参数支持字符串枚举、数值范围和布尔值。工具请求体最多 32 KiB，模型输出最多 512 tokens、8 条调用。返回的名称和实参必须符合本次工具结构。
 

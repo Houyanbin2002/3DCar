@@ -2,9 +2,9 @@
 
 | 项目 | 约定 |
 | --- | --- |
-| 版本与日期 | v1.3，2026-11-04 |
+| 版本与日期 | v1.4，2026-11-04 |
 | 分支与工作区 | `codex/intent-api`，`3DCar-intent-api` |
-| 需求依据 | 需求 v1.5 的 §4.4、§5、A13–A19，架构 v1.4 的 §4.3、§5 |
+| 需求依据 | 需求 v1.8 的 §4.4、§5、A13–A23，架构 v1.7 的 §4、§5 |
 | 公共契约 | `shared/control.ts` 与兼容的 `shared/intent.ts` |
 | 本分支路径 | `server/**` |
 | 运行方式 | Cloudflare Worker 接受 HTTPS 请求，单个 Durable Object 原子预留调用额度 |
@@ -18,6 +18,9 @@
 服务端适配通过 Bearer Key 鉴权、使用 `messages` 输入和 `choices[0].message.content` 输出的 Chat Completions 兼容接口。完整 HTTPS 地址、模型标识和 Key 从运行环境读取。发布时按所选服务商验证兼容性和真实中文意图效果。
 
 ## 2. HTTP 契约
+
+- 连续对话可带 `dialogue`：最多 12 条完整交替的 user/assistant 消息，每条非空且最多 1000 字符，合计最多 6000 字符。服务端拒绝 system 等角色、畸形、顺序错误及超量历史；将有效历史放在当前请求之前。结合当前工具状态理解短答和相对调整，信息不足时继续澄清。
+- `GET /api/speech` 提供中文 ASR WebSocket 代理，契约见 `shared/speech.ts`。限制 Origin、配额、帧大小、音频速率和 120 秒会话上限。服务端保存 Key 并固定识别配置。语音与模型使用不同配额桶，部署示例每客户端每分钟 20 次、各全站每日 100 次。
 
 - 路径为 `POST /api/intent`，媒体类型为 `application/json`。新请求包含 `text`、`tools`、`context`，执行后可附带最多两轮 `history`。每轮包含原调用 `calls` 和按 ID 一一对应的 `results`，字段见 `shared/control.ts`。文本去除两端空白后长度为 1–1000 个 Unicode 码点，读取请求体的等待上限为 5 秒。旧请求只含 `text`，保持 4096 字节上限。
 - 成功返回 HTTP 200，新契约为 `toolCalls` 与 `reply`，工具调用包含 `id`、`name`、`arguments`。无调用时 `reply` 是简短追问或提示。旧契约返回 `ventilate` 或 `unsupported`。错误返回固定 `error.code`。

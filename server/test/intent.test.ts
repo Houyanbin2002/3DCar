@@ -262,6 +262,23 @@ test('injects runtime tools into Qwen and returns validated function calls', asy
   assert.deepEqual(await response.json(), { toolCalls: [{ id: 'temperature-call', name: 'set_cabin_temperature', arguments: { celsius: 24 } }], reply: '' });
 });
 
+test('dialogue is validated and prior user/assistant turns precede the current request', async () => {
+  const dialogue = [
+    { role: 'user', content: '帮我调一下车窗' },
+    { role: 'assistant', content: '哪扇车窗？' },
+  ];
+  const response = await handleIntent(request(JSON.stringify({ text: '左前窗', tools: [runtimeTool], context: {}, dialogue })), environment(), async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(body.messages.slice(1, 3), dialogue);
+    assert.equal(JSON.parse(body.messages[3].content).text, '左前窗');
+    return modelResponse('想调整到多少？');
+  });
+  assert.equal(response.status, 200);
+  for (const invalid of [[{ role: 'system', content: 'bad' }], [dialogue[0]], [...dialogue, ...dialogue].reverse(), Array(14).fill(dialogue[0])]) {
+    assert.equal((await handleIntent(request(JSON.stringify({ text: '左前窗', tools: [runtimeTool], context: {}, dialogue: invalid })), environment(), unexpectedModelCall)).status, 400);
+  }
+});
+
 test('ambiguous or unsupported expressions may return clarification with no tool calls', async () => {
   const response = await handleIntent(toolRequest(), environment(), async () => modelResponse('你想设置多少度？'));
   assert.equal(response.status, 200);

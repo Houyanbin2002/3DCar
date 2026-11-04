@@ -40,8 +40,9 @@ class FakeClock implements VoiceClock {
 class FakeInput implements SpeechInput {
   supported = true;
   starts = 0;
+  autoStart = true;
   events: SpeechInputEvents | null = null;
-  start(events: SpeechInputEvents) { this.events = events; this.starts++; events.onStart(); }
+  start(events: SpeechInputEvents) { this.events = events; this.starts++; if (this.autoStart) events.onStart(); }
   stop() { this.events = null; }
   say(text: string, interim = '') { this.events?.onTranscript({ finals: text ? [text] : [], interim }); }
   speechStart() { this.events?.onSpeechStart(); }
@@ -121,6 +122,146 @@ test('多指令保持顺序、共享动作，并支持无标点完整指令', ()
   });
 });
 
+test('最终转写即使没有 speechend 也进入模型，保留相对调整原句', async () => {
+  let heard = '';
+  const s = setup({ control: async (request) => { heard = request.text; return { toolCalls: [], reply: '你想调整哪扇车窗？' }; } });
+  s.input.speechStart();
+  s.input.say('小满同学，车窗再低一点');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(heard, '车窗再低一点');
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  assert.equal(s.calls.length, 0);
+  s.control.stop();
+});
+
+test('模型连续澄清、补充窗位和开度，确认后执行，并支持带上下文的相对调整', async () => {
+  const requests: string[] = [];
+  const s = setup({ control: async (request) => {
+    if (request.history) return { toolCalls: [], reply: '已核对车窗位置。' };
+    requests.push(request.text);
+    if (requests.length === 1) return { toolCalls: [], reply: '你想调整哪扇车窗？' };
+    assert.ok(request.dialogue?.some((message) => message.content.includes('哪扇车窗')));
+    if (requests.length === 2) return { toolCalls: [], reply: '左前车窗想打开多少？' };
+    assert.ok(request.dialogue?.some((message) => message.content === '左前车窗'));
+    const openness = request.text === '一半' ? 0.5 : 0.75;
+    if (openness === 0.75) assert.equal((request.context.set_window_openness as Record<string, { openness: number }>).frontLeftWindow.openness, 0.5);
+    return { toolCalls: [{ id: 'open-' + requests.length, name: 'set_window_openness', arguments: { target: 'frontLeftWindow', openness } }], reply: '' };
+  } });
+  const say = async (text: string) => { s.input.say(text); s.clock.advance(1_000); await flush(); };
+  await say('小满同学，帮我调整一下车窗');
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  await say('左前车窗');
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  await say('一半');
+  assert.equal(s.calls.length, 0);
+  assert.equal(s.control.getSnapshot().phase, 'confirming');
+  await say('可以');
+  assert.equal(s.vehicle.getSnapshot().parts.frontLeftWindow.openness, 0.5);
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  await say('再低一点');
+  assert.equal(s.control.getSnapshot().phase, 'confirming');
+  await say('好的');
+  assert.equal(s.vehicle.getSnapshot().parts.frontLeftWindow.openness, 0.75);
+  assert.deepEqual(requests, ['帮我调整一下车窗', '左前车窗', '一半', '再低一点']);
+  await say('好了');
+  assert.equal(s.control.getSnapshot().phase, 'waiting');
+  await say('再低一点');
+  assert.equal(requests.length, 4, '结束后重新要求唤醒');
+  s.control.stop();
+});
+
+test('澄清对话可语音取消，静默超时后清除上下文', async () => {
+  for (const end of ['不用了', 'timeout']) {
+    const s = setup({ control: async () => ({ toolCalls: [], reply: '你想操作哪扇车窗？' }) });
+    s.input.say('小满同学，帮我调一下');
+    s.clock.advance(1_000);
+    await flush();
+    assert.equal(s.control.getSnapshot().phase, 'dialogue');
+    if (end === 'timeout') s.clock.advance(60_000);
+    else s.input.say(end);
+    assert.equal(s.control.getSnapshot().phase, 'waiting');
+    assert.equal(s.calls.length, 0);
+    s.control.stop();
+  }
+});
+
+test('车窗开度规则支持动词前后置、共享比例和明确整组目标', () => {
+  for (const [text, partId, openness] of [
+    ['把左前车窗打开一点', 'frontLeftWindow', 0.25],
+    ['打开右前车窗一点点', 'frontRightWindow', 0.25],
+    ['把左后窗打开一条缝', 'rearLeftWindow', 0.25],
+    ['右后车窗打开一半', 'rearRightWindow', 0.5],
+  ] as const) {
+    assert.deepEqual(parseCommand(text), {
+      kind: 'commands', actions: [{ kind: 'part', partId, open: true, openness }], messages: [],
+    });
+  }
+  assert.deepEqual(parseCommand('所有车窗打开一半'), {
+    kind: 'commands', actions: [{ kind: 'group', group: 'windows', open: true, openness: 0.5 }], messages: [],
+  });
+  assert.deepEqual(parseCommand('打开左前车窗一半和右前车窗'), {
+    kind: 'commands', actions: [
+      { kind: 'part', partId: 'frontLeftWindow', open: true, openness: 0.5 },
+      { kind: 'part', partId: 'frontRightWindow', open: true, openness: 0.5 },
+    ], messages: [],
+  });
+  for (const text of ['打开车窗', '打开左前门一半', '升起左前车窗一点', '左前车窗打开一半多一点']) {
+    assert.equal(parseCommand(text).kind, 'clarify', text);
+  }
+});
+
+test('明确窗位和比例直接执行规则，开度写入车辆状态且无需模型', async () => {
+  const s = setup({ control: async () => { throw new Error('Fraction rule must not call a model'); } });
+  s.input.say('小满同学，把左前车窗打开一点');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(s.vehicle.getSnapshot().parts.frontLeftWindow.openness, 0.25);
+  assert.match(s.control.getSnapshot().message, /25%/u);
+  assert.equal(s.vehicle.getSnapshot().parts.frontRightWindow.open, false);
+  s.input.say('小满同学，左前车窗打开一半');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(s.vehicle.getSnapshot().parts.frontLeftWindow.openness, 0.5);
+  s.control.stop();
+});
+
+test('未指明窗位的比例请求先确认全部四窗，纯语音同意后按比例执行', async () => {
+  for (const [text, openness] of [['把车窗打开一点', 0.25], ['车窗打开一半', 0.5]] as const) {
+    const s = setup({ control: async () => { throw new Error('Local confirmation must not call a model'); } });
+    assert.equal(routeCommand(text).steps[0].source, 'confirmation');
+    s.input.say('小满同学，' + text);
+    s.clock.advance(1_000);
+    await flush();
+    assert.equal(s.control.getSnapshot().phase, 'confirming');
+    assert.match(s.control.getSnapshot().message, /所有车窗/u);
+    assert.equal(s.calls.length, 0);
+    s.input.say('可以');
+    await flush();
+    assert.deepEqual(s.calls, [[{ kind: 'group', group: 'windows', open: true, openness }]]);
+    for (const id of ['frontLeftWindow', 'frontRightWindow', 'rearLeftWindow', 'rearRightWindow'] as const) {
+      assert.equal(s.vehicle.getSnapshot().parts[id].openness, openness);
+    }
+    assert.equal(s.control.getSnapshot().phase, 'dialogue');
+    s.control.stop();
+  }
+});
+
+test('比例工具校验范围并执行具体窗位，模型也能控制半开状态', async () => {
+  const s = setup();
+  const response: ControlResponse = {
+    toolCalls: [{ id: 'half-open', name: 'set_window_openness', arguments: { target: 'rearRightWindow', openness: 0.5 } }], reply: '',
+  };
+  const batch = s.tools.prepare(response);
+  assert.equal(batch.requiresConfirmation, true);
+  await s.tools.execute(batch, new AbortController().signal, () => {});
+  assert.equal(s.vehicle.getSnapshot().parts.rearRightWindow.openness, 0.5);
+  for (const openness of [-1, 1.1, NaN]) {
+    assert.throws(() => s.tools.prepare({ ...response, toolCalls: [{ ...response.toolCalls[0], arguments: { target: 'rearRightWindow', openness } }] }));
+  }
+  s.control.stop();
+});
+
 test('部分有效只产生可靠动作，模糊对象走本地提示', () => {
   const partial = parseCommand('打开左前门，再打开');
   assert.equal(partial.kind, 'commands');
@@ -159,7 +300,7 @@ test('唤醒词拆成多段时短时间拼接，过期片段不会唤醒', async
     s.clock.advance(1_000);
     await flush();
     assert.equal(s.calls.length, expired ? 0 : 1);
-    assert.equal(s.control.getSnapshot().phase, 'waiting');
+    assert.equal(s.control.getSnapshot().phase, expired ? 'waiting' : 'dialogue');
     s.control.stop();
   }
 });
@@ -195,21 +336,57 @@ test('未唤醒时不调用车辆或模型，中间结果不执行', () => {
   s.control.stop();
 });
 
-test('同段唤醒与动作一次提交，第二轮必须重新唤醒', async () => {
+test('操作后 20 秒内直接接收连续指令，每次完成重置窗口，超时后才需要唤醒', async () => {
   const s = setup();
   s.input.say('小满同学，打开左前门');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.calls.length, 1);
   assert.equal(s.vehicle.getSnapshot().parts.frontLeftDoor.open, true);
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  s.clock.advance(19_000);
   s.input.say('关闭左前门');
-  s.clock.advance(2_000);
-  assert.equal(s.calls.length, 1);
-  s.input.say('小满同学关闭左前门');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.calls.length, 2);
   assert.equal(s.vehicle.getSnapshot().parts.frontLeftDoor.open, false);
+  s.clock.advance(19_999);
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  s.clock.advance(1);
+  assert.equal(s.control.getSnapshot().phase, 'waiting');
+  assert.equal(s.control.getSnapshot().enabled, true, '仅恢复唤醒门控，语音功能不关闭');
+  s.input.say('打开左前门');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(s.calls.length, 2);
+  s.input.say('小满同学打开左前门');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(s.calls.length, 3);
+  s.control.stop();
+});
+
+test('规则操作后的免唤醒相对调整会携带上一动作及当前开度进入模型', async () => {
+  let requests = 0;
+  const s = setup({ control: async (request) => {
+    if (request.history) return { toolCalls: [], reply: '已核对。' };
+    requests++;
+    assert.equal(request.text, '再低一点');
+    assert.ok(request.dialogue?.some((message) => message.content.includes('左前车窗')));
+    assert.equal((request.context.set_window_openness as Record<string, { openness: number }>).frontLeftWindow.openness, 0.25);
+    return { toolCalls: [{ id: 'relative', name: 'set_window_openness', arguments: { target: 'frontLeftWindow', openness: 0.5 } }], reply: '' };
+  } });
+  s.input.say('小满同学，把左前车窗打开一点');
+  s.clock.advance(1_000);
+  await flush();
+  s.input.say('再低一点');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(requests, 1);
+  assert.equal(s.vehicle.getSnapshot().parts.frontLeftWindow.openness, 0.25);
+  s.input.say('可以');
+  await flush();
+  assert.equal(s.vehicle.getSnapshot().parts.frontLeftWindow.openness, 0.5);
   s.control.stop();
 });
 
@@ -338,7 +515,7 @@ test('否定和超时清除待确认动作', async () => {
     s.clock.advance(1_000);
     await flush();
     if (mode === 'negative') s.input.say('不用');
-    else s.clock.advance(5_000);
+    else s.clock.advance(15_000);
     s.control.confirm(true);
     await flush();
     assert.equal(s.calls.length, 0);
@@ -359,11 +536,71 @@ test('播报时暂停识别，播报结束后才计确认时间', async () => {
   audio.resolve();
   await flush();
   assert.equal(s.control.getSnapshot().phase, 'confirming');
-  s.clock.advance(4_999);
+  s.clock.advance(14_999);
   assert.equal(s.control.getSnapshot().phase, 'confirming');
   s.clock.advance(1);
   assert.equal(s.control.getSnapshot().phase, 'waiting');
   s.control.stop();
+});
+
+test('纯语音确认无需再次唤醒，常用肯定答复只执行一次', async () => {
+  for (const reply of ['可以', '可以的', '好的', '需要', '没问题']) {
+    const s = setup();
+    s.input.say('小满同学，车里有点闷热');
+    s.clock.advance(1_000);
+    await flush();
+    s.clock.advance(10_000);
+    assert.equal(s.control.getSnapshot().phase, 'confirming');
+    s.input.say('', reply);
+    assert.equal(s.calls.length, 0, '中间转写不能确认');
+    s.input.say(reply);
+    await flush();
+    assert.deepEqual(s.calls, [[{ kind: 'part', partId: 'frontLeftWindow', open: true }]]);
+    s.input.say(reply);
+    assert.equal(s.calls.length, 1);
+    s.control.stop();
+  }
+});
+
+test('确认计时从语音服务就绪开始，连接耗时不占用回答时间', async () => {
+  const s = setup();
+  s.input.autoStart = false;
+  s.input.say('小满同学，车里有点闷热');
+  s.clock.advance(1_000);
+  await flush();
+  s.clock.advance(20_000);
+  assert.equal(s.control.getSnapshot().phase, 'confirming');
+  s.input.events?.onStart();
+  s.clock.advance(14_999);
+  assert.equal(s.control.getSnapshot().phase, 'confirming');
+  s.input.say('可以');
+  await flush();
+  assert.equal(s.calls.length, 1);
+  s.control.stop();
+});
+
+test('临近超时开始回答时等待最终转写，否定和含糊答复不执行', async () => {
+  for (const reply of ['不用了', '不可以', '可以吗']) {
+    const s = setup();
+    s.input.say('小满同学，车里有点闷热');
+    s.clock.advance(1_000);
+    await flush();
+    s.clock.advance(14_000);
+    s.input.speechStart();
+    s.input.say('', reply);
+    s.clock.advance(2_000);
+    assert.equal(s.control.getSnapshot().phase, 'confirming');
+    s.input.say(reply);
+    await flush();
+    assert.equal(s.calls.length, 0);
+    if (reply === '可以吗') {
+      assert.equal(s.control.getSnapshot().phase, 'confirming');
+      s.control.cancel();
+    } else assert.equal(s.control.getSnapshot().phase, 'waiting');
+    s.input.say('可以');
+    assert.equal(s.calls.length, 0, '确认窗口外的肯定不能执行');
+    s.control.stop();
+  }
 });
 
 test('关闭语音或重新唤醒使迟到的模型响应失效', async () => {
@@ -627,12 +864,12 @@ test('只读工具按登记策略直接执行，车辆动作仍由确认策略�
   s.clock.advance(1_000);
   await flush();
   assert.equal(readCount, 1);
-  assert.equal(s.control.getSnapshot().phase, 'waiting');
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
   assert.equal(s.spoken.length, 0);
   s.control.stop();
 });
 
-test('语音确认一次后完成三项调用和失败项重试，最终恢复等待唤醒', async () => {
+test('语音确认一次后完成三项调用和失败项重试，保留后续对话', async () => {
   const names = ['demo_first', 'demo_second', 'demo_third'];
   const attempts = [0, 0, 0];
   const s = setup({ control: async (request) => {
@@ -663,7 +900,7 @@ test('语音确认一次后完成三项调用和失败项重试，最终恢复�
   await flush();
   assert.deepEqual(attempts, [1, 2, 1]);
   assert.equal(s.spoken.length, 1);
-  assert.equal(s.control.getSnapshot().phase, 'waiting');
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
   assert.ok(s.control.getSnapshot().feedback.some((message) => message.includes('最终完成3项，失败0项')));
   s.control.stop();
 });

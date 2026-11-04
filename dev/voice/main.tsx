@@ -2,7 +2,8 @@ import { StrictMode, useMemo, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import { VoicePanel } from '../../src/ui/VoicePanel';
 import { PART_LABELS } from '../../src/voice/parseCommand';
-import { createBrowserSpeechInput, createBrowserSpeechOutput } from '../../src/voice/speechIO';
+import { createBrowserSpeechOutput } from '../../src/voice/speechIO';
+import { createRealtimeSpeechInput } from '../../src/voice/realtimeSpeech';
 import type { ControlClient } from '../../src/voice/controlClient';
 import { WINDOW_IDS } from '../../src/contracts/vehicle';
 import type { PartSnapshot } from '../../src/contracts/vehicle';
@@ -27,7 +28,7 @@ function Demo() {
   const [live, setLive] = useState(false);
   const [realModel, setRealModel] = useState(false);
   const [text, setText] = useState('小满同学，打开左前门，再打开后备箱');
-  const input = useMemo(() => live ? createBrowserSpeechInput() : simulatedInput, [live]);
+  const input = useMemo(() => live ? createRealtimeSpeechInput() : simulatedInput, [live]);
   const output = useMemo(() => live ? createBrowserSpeechOutput() : simulatedOutput, [live]);
   const snapshot = useSyncExternalStore(vehicle.subscribe, vehicle.getSnapshot);
   return (
@@ -47,7 +48,7 @@ function Demo() {
           <button disabled={live} type="submit">发送这句话</button>
         </form>
         <div className="voice-demo__examples">
-          {['小满同学', '小满同学，打开前备箱和后备箱', '小满同学，车里有点闷热', '需要', '不用'].map((sample) => (
+          {['小满同学', '小满同学，打开前备箱和后备箱', '小满同学，把左前车窗打开一点', '小满同学，车窗打开一半', '小满同学，车里有点闷热', '可以', '不用'].map((sample) => (
             <button type="button" key={sample} disabled={live} onClick={() => simulatedInput.say(sample)}>{sample}</button>
           ))}
         </div>

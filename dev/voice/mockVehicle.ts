@@ -35,7 +35,11 @@ export function createSimulatedVehicle(): VehicleController {
           } else {
             const ids = action.kind === 'part' ? [action.partId] : action.group === 'doors' ? DOOR_IDS : WINDOW_IDS;
             const parts = { ...snapshot.parts };
-            for (const id of ids) parts[id] = { open: action.open, targetOpen: action.open, moving: false };
+            for (const id of ids) parts[id] = {
+              open: action.open, targetOpen: action.open, moving: false,
+              ...(WINDOW_IDS.includes(id as typeof WINDOW_IDS[number])
+                ? { openness: action.openness ?? Number(action.open), targetOpenness: action.openness ?? Number(action.open) } : {}),
+            };
             snapshot = { ...snapshot, parts };
           }
           notify();

@@ -8,10 +8,12 @@ import { createVehicleToolRegistry } from './toolRegistry';
 import type { ToolRegistry } from './toolRegistry';
 import { runToolCycle } from './runToolCycle';
 import type { ToolExecutionPlan } from './runToolCycle';
-import { createBrowserSpeechInput, createBrowserSpeechOutput } from './speechIO';
+import type { DialogueMessage } from '../../shared/control';
+import { createBrowserSpeechOutput } from './speechIO';
+import { createRealtimeSpeechInput } from './realtimeSpeech';
 import type { SpeechInput, SpeechOutput, TranscriptUpdate } from './speechIO';
 
-export type VoicePhase = 'off' | 'starting' | 'waiting' | 'listening' | 'thinking'
+export type VoicePhase = 'off' | 'starting' | 'waiting' | 'listening' | 'dialogue' | 'thinking'
   | 'speaking' | 'confirming' | 'executing' | 'error' | 'unsupported';
 
 export interface VoiceSnapshot {
@@ -36,8 +38,8 @@ export interface VoiceControlOptions {
   timing?: Partial<typeof defaultTiming>;
 }
 
-const defaultTiming = { wakeMs: 5_000, settleMs: 1_000, confirmMs: 5_000, turnMs: 20_000, restartMs: 300 };
-type TimerName = 'wake' | 'settle' | 'confirm' | 'turn' | 'restart' | 'fragment';
+const defaultTiming = { wakeMs: 5_000, settleMs: 1_000, confirmMs: 15_000, confirmSpeechMs: 10_000, dialogueMs: 60_000, followupMs: 20_000, turnMs: 20_000, restartMs: 300 };
+type TimerName = 'wake' | 'settle' | 'confirm' | 'turn' | 'restart' | 'fragment' | 'dialogue';
 const defaultClock: VoiceClock = {
   schedule(callback, milliseconds) {
     const timer = setTimeout(callback, milliseconds);
@@ -51,7 +53,11 @@ const errors: Record<string, string> = {
   'audio-capture': '无法使用麦克风，请检查设备连接和系统权限。',
   network: '语音识别网络异常，请检查网络后重新开启。',
   'language-not-supported': '当前语音服务不支持中文，请更换浏览器后重试。',
-  unsupported: '当前浏览器未提供语音识别，请使用桌面 Chrome 或 Edge。',
+  unsupported: '当前浏览器不支持实时音频采集，请使用 HTTPS 页面或本机地址上的桌面 Chrome / Edge。',
+  unconfigured: '语音识别接口尚未配置，请先连接语音服务。',
+  'speech-service': '实时语音识别连接失败，请检查服务端或网络后重新开启。',
+  'rate-limited': '语音识别开启较频繁，请稍后再试。',
+  'audio-limit': '音频传输异常，请重新开启语音。',
 };
 
 export class VoiceControl {
@@ -67,18 +73,26 @@ export class VoiceControl {
   private session = 0;
   private turn = 0;
   private inputActive = false;
+  private inputReady = false;
   private speechActive = false;
   private hasInterim = false;
   private commandText = '';
   private wakeFragment = '';
   private pendingTools: ToolExecutionPlan | null = null;
+  private pendingRuleActions: readonly VehicleAction[] | null = null;
+  private confirmQuestion = '';
+  private dialogueActive = false;
+  private dialogue: DialogueMessage[] = [];
+  private dialogueIdleMs = defaultTiming.dialogueMs;
+  private completedThisTurn = false;
+  private plannedThisTurn = false;
   private steps: RoutedStep[] = [];
   private abort = new AbortController();
   private snapshot: VoiceSnapshot;
 
   constructor(options: VoiceControlOptions) {
     this.controller = options.controller;
-    this.input = options.input ?? createBrowserSpeechInput();
+    this.input = options.input ?? createRealtimeSpeechInput();
     this.output = options.output ?? createBrowserSpeechOutput();
     this.controlClient = options.controlClient ?? createControlClient();
     this.tools = options.tools ?? createVehicleToolRegistry(options.controller);
@@ -115,12 +129,16 @@ export class VoiceControl {
   };
 
   readonly confirm = (accepted: boolean): void => {
-    if (this.snapshot.phase !== 'confirming' || !this.pendingTools) return;
+    if (this.snapshot.phase !== 'confirming' || (!this.pendingTools && !this.pendingRuleActions)) return;
     const pending = this.pendingTools;
+    const actions = this.pendingRuleActions;
     this.pendingTools = null;
+    this.pendingRuleActions = null;
+    this.confirmQuestion = '';
     this.cancelTimer('confirm');
     if (!accepted) { this.finish('已取消本轮建议。'); return; }
-    void this.executeConfirmed(pending);
+    if (actions) void this.executeConfirmedRules(actions);
+    else if (pending) void this.executeConfirmed(pending);
   };
 
   private update(change: Partial<VoiceSnapshot>): void {
@@ -143,11 +161,16 @@ export class VoiceControl {
     this.abort.abort();
     this.abort = new AbortController();
     this.pendingTools = null;
+    this.pendingRuleActions = null;
+    this.confirmQuestion = '';
     this.steps = [];
+    this.dialogueActive = false;
+    this.dialogue = [];
+    this.completedThisTurn = this.plannedThisTurn = false;
     this.commandText = '';
     this.wakeFragment = '';
     this.hasInterim = false;
-    for (const name of ['wake', 'settle', 'confirm', 'turn', 'fragment'] as const) this.cancelTimer(name);
+    for (const name of ['wake', 'settle', 'confirm', 'turn', 'fragment', 'dialogue'] as const) this.cancelTimer(name);
   }
 
   private current(turn: number): boolean {
@@ -157,7 +180,7 @@ export class VoiceControl {
   private pauseInput(): void {
     this.cancelTimer('restart');
     this.session += 1;
-    this.inputActive = this.speechActive = false;
+    this.inputActive = this.inputReady = this.speechActive = false;
     this.input.stop();
   }
 
@@ -170,14 +193,23 @@ export class VoiceControl {
     try {
       this.input.start({
         onStart: () => {
-          if (active() && this.snapshot.phase === 'starting') {
+          if (!active()) return;
+          this.inputReady = true;
+          if (this.snapshot.phase === 'confirming') this.armConfirmation();
+          else if (this.snapshot.phase === 'dialogue') this.armDialogue();
+          else if (this.snapshot.phase === 'starting') {
             this.update({ phase: 'waiting', message: '等待唤醒，说“小满同学”。' });
           }
         },
         onEnd: () => {
           if (!active()) return;
           this.session += 1;
-          this.inputActive = this.speechActive = this.hasInterim = false;
+          this.inputActive = this.inputReady = this.speechActive = this.hasInterim = false;
+          if (this.snapshot.phase === 'confirming') {
+            this.cancelTimer('confirm');
+            this.update({ message: `${this.confirmQuestion} 正在恢复语音连接，请稍候…` });
+          }
+          if (this.snapshot.phase === 'dialogue') this.cancelTimer('dialogue');
           this.settle();
           this.schedule('restart', this.timing.restartMs, () => this.startInput());
         },
@@ -187,6 +219,11 @@ export class VoiceControl {
           if (this.snapshot.phase === 'listening') {
             this.cancelTimer('wake');
             this.cancelTimer('settle');
+          } else if (this.snapshot.phase === 'confirming') {
+            this.schedule('confirm', this.timing.confirmSpeechMs, () => this.finish('未听清确认答复，已取消本轮建议。'));
+          } else if (this.snapshot.phase === 'dialogue') {
+            this.cancelTimer('dialogue');
+            this.schedule('turn', this.timing.turnMs, () => this.finish('本轮未收到完整答复，请重新唤醒。'));
           }
         },
         onSpeechEnd: () => { if (active()) { this.speechActive = false; this.settle(); } },
@@ -235,6 +272,17 @@ export class VoiceControl {
       const remainder = extractWakeCommand(heard);
       if (remainder !== null) {
         this.beginTurn(remainder);
+      } else if (this.snapshot.phase === 'dialogue') {
+        if (/^(好了|可以了|就这样|结束|不用|不用了|不需要|取消|算了|谢谢)$/u.test(normalizeSpeech(text))) {
+          this.finish('本轮对话已结束，请说“小满同学”开启新一轮。');
+          continue;
+        }
+        const dialogue = this.dialogue;
+        const steps = this.steps;
+        this.beginTurn(text);
+        this.dialogueActive = true;
+        this.dialogue = dialogue;
+        this.steps = steps;
       } else if (this.snapshot.phase === 'waiting') {
         const normalized = normalizeSpeech(heard);
         this.wakeFragment = ['小满同', '小满', '小'].find((prefix) => normalized.endsWith(prefix)) ?? '';
@@ -245,14 +293,18 @@ export class VoiceControl {
         this.appendCommand(text);
       } else if (this.snapshot.phase === 'confirming') {
         const reply = normalizeSpeech(text);
-        if (/^(需要|好的|好|是的|可以|打开吧|降下吧|确认)$/u.test(reply)) this.confirm(true);
-        else if (/^(不用|不需要|不要|取消|算了)$/u.test(reply)) this.confirm(false);
-        else this.update({ message: '请回答“需要”或“不用”。' });
+        this.update({ transcript: text });
+        if (/^(需要|需要的|好的|好|好啊|好呀|好吧|是的|可以|可以的|可以啊|行|行的|没问题|同意|打开吧|降下吧|执行吧|确认)$/u.test(reply)) this.confirm(true);
+        else if (/^(不用|不用了|不需要|不要|不要了|不可以|取消|算了)$/u.test(reply)) this.confirm(false);
+        else this.armConfirmation('没听清确认答复，请直接说“可以”或“不用”。');
       } else if (/^(取消|算了|不用)$/u.test(normalizeSpeech(text))
         && ['thinking', 'executing'].includes(this.snapshot.phase)) {
         this.cancel();
       }
     }
+    // Some ASR engines omit speechend, or emit sentence_begin on a finalized result.
+    // A final transcript is sufficient to settle; later interim text can extend it.
+    if (update.finals.length) this.speechActive = false;
     this.hasInterim = Boolean(normalizeSpeech(update.interim));
     if (this.snapshot.phase === 'waiting' && this.hasInterim) {
       const transcript = this.wakeFragment + update.interim;
@@ -265,7 +317,15 @@ export class VoiceControl {
       this.cancelTimer('settle');
       this.update({ transcript: this.commandText + update.interim });
     }
+    if (this.snapshot.phase === 'confirming' && this.hasInterim) this.update({ transcript: update.interim });
+    if (this.snapshot.phase === 'dialogue' && this.hasInterim) this.update({ transcript: update.interim });
     this.settle();
+  }
+
+  private armConfirmation(message?: string): void {
+    if (this.snapshot.phase !== 'confirming' || (!this.pendingTools && !this.pendingRuleActions) || !this.inputReady) return;
+    this.update({ message: message ?? `${this.confirmQuestion} 请直接说“可以”或“不用”（${Math.round(this.timing.confirmMs / 1000)} 秒内，无需唤醒）。` });
+    this.schedule('confirm', this.timing.confirmMs, () => this.finish('确认超时，已取消本轮建议，请说“小满同学”重新唤醒。'));
   }
 
   private settle(): void {
@@ -292,9 +352,23 @@ export class VoiceControl {
     while (this.current(turn) && this.steps.length) {
       const step = this.steps.shift()!;
       if (step.source === 'rule') await this.executeActions(step.actions);
+      else if (step.source === 'confirmation') {
+        this.pendingRuleActions = step.actions;
+        await this.askConfirmation(`没有指定哪扇车窗，要我帮你${step.actions.map(describeAction).join('、')}吗？`, turn);
+        return;
+      }
       else if (await this.planTools(step.text)) return;
     }
-    if (this.current(turn)) this.finish(this.snapshot.feedback.join(' ') || '没听清，可以说打开左前门。');
+    if (this.current(turn)) {
+      const message = this.snapshot.feedback.join(' ') || '没听清，可以说打开左前门。';
+      if (this.completedThisTurn) {
+        if (!this.plannedThisTurn) this.remember('user', this.commandText);
+        this.remember('assistant', message);
+        this.dialogueActive = true;
+        this.resumeDialogue(message, this.timing.followupMs);
+      } else if (this.dialogueActive) this.resumeDialogue(message);
+      else this.finish(message);
+    }
   }
 
   private async executeActions(actions: readonly VehicleAction[]): Promise<void> {
@@ -311,6 +385,7 @@ export class VoiceControl {
         },
       });
       if (!this.current(turn)) return;
+      this.completedThisTurn ||= results.some((result) => result.outcome === 'completed' || result.outcome === 'already-at-target');
       if (this.snapshot.feedback.length === previousCount) {
         for (const result of results) this.addFeedback(describeResult(result));
       }
@@ -322,11 +397,15 @@ export class VoiceControl {
   private async executeToolBatch(plan: ToolExecutionPlan): Promise<void> {
     const turn = this.turn;
     try {
-      await runToolCycle({
+      const result = await runToolCycle({
         plan, registry: this.tools, client: this.controlClient, signal: this.abort.signal,
         onMessage: (message) => { if (this.current(turn)) this.addFeedback(message); },
         onPhase: (phase, message) => { if (this.current(turn)) this.update({ phase, message }); },
       });
+      if (this.current(turn)) {
+        this.completedThisTurn ||= result.history.some((exchange) => exchange.results.some((item) => item.status === 'succeeded'));
+        if (this.dialogueActive) this.remember('assistant', `${this.snapshot.feedback.join(' ')} ${result.summary}`);
+      }
     } catch {
       if (this.current(turn)) this.addFeedback('本次工具动作未能完成，请重新唤醒后重试。');
     }
@@ -338,39 +417,78 @@ export class VoiceControl {
     if (this.current(turn)) await this.advance();
   }
 
+  private async executeConfirmedRules(actions: readonly VehicleAction[]): Promise<void> {
+    const turn = this.turn;
+    await this.executeActions(actions);
+    if (this.current(turn)) await this.advance();
+  }
+
+  private async askConfirmation(question: string, turn: number): Promise<void> {
+    this.confirmQuestion = question;
+    this.pauseInput();
+    this.update({ phase: 'speaking', message: question });
+    try { await this.output.speak(question, this.abort.signal); } catch { /* The visible question also supports confirmation. */ }
+    if (!this.current(turn)) return;
+    this.update({ phase: 'confirming', transcript: '', message: `${question} 正在连接语音，稍后可直接说“可以”或“不用”…` });
+    this.startInput();
+  }
+
   private async planTools(text: string): Promise<boolean> {
     const turn = this.turn;
     this.update({ phase: 'thinking', message: '正在理解你的意思…' });
     try {
-      const request = { text, tools: this.tools.definitions(), context: this.tools.context() };
+      const request = { text, tools: this.tools.definitions(), context: this.tools.context(),
+        ...(this.dialogue.length ? { dialogue: structuredClone(this.dialogue) } : {}) };
       const response = await this.controlClient(request, this.abort.signal);
       if (!this.current(turn)) return false;
       const batch = this.tools.prepare(response);
+      this.dialogueActive = true;
+      this.plannedThisTurn = true;
+      this.remember('user', text);
       if (!batch.tools.length) {
-        this.addFeedback(`未执行车辆动作。${response.reply}`);
-        return false;
+        this.remember('assistant', response.reply);
+        this.pauseInput();
+        this.update({ phase: 'speaking', message: response.reply });
+        try { await this.output.speak(response.reply, this.abort.signal); } catch { /* Visible clarification remains available. */ }
+        if (this.current(turn)) this.resumeDialogue(response.reply);
+        return true;
       }
       const plan = { batch, request };
       if (!batch.requiresConfirmation) { await this.executeToolBatch(plan); return false; }
       this.pendingTools = plan;
       const question = `要我帮你${batch.tools.map(({ prepared }) => prepared.label).join('、')}吗？`;
-      this.pauseInput();
-      this.update({ phase: 'speaking', message: question });
-      try { await this.output.speak(question, this.abort.signal); } catch { /* The visible question also supports confirmation. */ }
-      if (!this.current(turn)) return false;
-      this.update({ phase: 'confirming', message: question });
-      this.startInput();
-      if (this.current(turn)) {
-        this.schedule('confirm', this.timing.confirmMs, () => this.finish('确认超时，已取消本轮建议。'));
-      }
+      this.remember('assistant', question);
+      await this.askConfirmation(question, turn);
       return true;
     } catch (error) {
       if (!this.current(turn)) return false;
+      this.dialogueActive = false;
       const reason = error instanceof IntentClientError && error.code === 'rate-limited'
         ? '智能建议使用较频繁，请稍后再试。' : '智能建议暂时不可用。';
       this.addFeedback(`${reason}可以直接说“打开左前窗”。`);
       return false;
     }
+  }
+
+  private remember(role: DialogueMessage['role'], content: string): void {
+    const last = this.dialogue.at(-1);
+    if (last?.role === role) last.content = `${last.content}\n${content}`.slice(-1000);
+    else this.dialogue.push({ role, content: content.slice(0, 1000) });
+    while (this.dialogue.length > 12 || this.dialogue.reduce((sum, message) => sum + message.content.length, 0) > 6000) this.dialogue.splice(0, 2);
+  }
+
+  private armDialogue(): void {
+    this.schedule('dialogue', this.dialogueIdleMs, () => this.finish('暂未收到后续答复，已回到等待唤醒。可说“小满同学”继续控车。'));
+  }
+
+  private resumeDialogue(message: string, idleMs = this.timing.dialogueMs): void {
+    for (const name of ['wake', 'turn', 'settle'] as const) this.cancelTimer(name);
+    this.commandText = '';
+    this.hasInterim = this.speechActive = false;
+    this.dialogueIdleMs = idleMs;
+    this.update({ phase: 'dialogue', message: `${message} ${Math.round(idleMs / 1000)} 秒内可直接继续说，无需唤醒；说“好了”结束。` });
+    this.startInput();
+    if (this.inputReady) this.armDialogue();
   }
 
   private finish(message: string, feedback: readonly string[] = this.snapshot.feedback): void {

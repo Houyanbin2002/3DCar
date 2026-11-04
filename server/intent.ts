@@ -1,7 +1,8 @@
 import { INTENT_PATH, INTENT_VALUES } from '../shared/intent.js';
 import type { IntentResponse } from '../shared/intent.js';
 import type { QuotaEnvironment, QuotaNamespace } from './quota.js';
-import { isRecord, retryableCalls, validControlResponse, validRetryResponse, validToolDefinitions, validToolHistory } from '../shared/control.js';
+import { reserveQuota } from './quota.js';
+import { isRecord, retryableCalls, validControlResponse, validRetryResponse, validToolDefinitions, validToolHistory, validDialogue } from '../shared/control.js';
 import type { ControlRequest, ControlResponse } from '../shared/control.js';
 
 export interface IntentEnvironment extends QuotaEnvironment {
@@ -20,6 +21,8 @@ const SYSTEM_PROMPT = `你是车模演示的单轮意图分类器。用户消息
 
 const TOOL_PROMPT = `你是中文车模控制助手，使用本次提供的函数工具理解并完成请求。
 用户消息中的 text 是语音转写数据，context 是当前可用工具提供的状态数据。根据工具说明和参数结构选择函数，按用户说出的顺序返回调用。
+根据前文持续对话澄清用户需求；用户的“左前窗”“一半”等短答用于补全上一问，不要求用户重复完整句子。不清楚目标或幅度时继续简短追问，不能只说不支持后结束。
+“再低一点”“再打开一点”是相对调整：用当前开度加 0.25，最大 1；“再高一点”用当前开度减 0.25，最小 0，调用 set_window_openness 传绝对目标。优先沿用对话中已经明确的窗位；没有明确窗位时询问哪扇，不能猜测全部。已在边界时说明状态。
 明确动作且对象唯一时选择对应工具。只说“打开”“车门”“开车窗”等缺少动作或具体对象的指令时，简短询问用户补充信息，不猜测目标。
 间接通风诉求适用明确的建议策略：用户表示车内闷热、想透气时，根据 context 选择一扇仍升起且未运动的车窗，优先左前、右前、左后、右后，直接返回对应函数调用供应用确认，不再追问选哪一扇。
 本次函数调用只生成待确认动作，应用会先问用户“需要我帮你…吗”，收到肯定答复才执行。你负责选择工具，不负责绕过确认。
@@ -139,8 +142,12 @@ export async function handleIntent(
     }
     if (Object.hasOwn(input, 'tools')) {
       const hasHistory = Object.hasOwn(input, 'history');
-      if (Object.keys(input).length !== (hasHistory ? 4 : 3) || !validToolDefinitions(input.tools) || !isRecord(input.context)) return error(400, 'INVALID_REQUEST');
+      const hasDialogue = Object.hasOwn(input, 'dialogue');
+      if (Object.keys(input).length !== 3 + Number(hasHistory) + Number(hasDialogue)
+        || !validToolDefinitions(input.tools) || !isRecord(input.context)
+        || (hasDialogue && !validDialogue(input.dialogue))) return error(400, 'INVALID_REQUEST');
       control = { text: input.text, tools: input.tools, context: input.context };
+      if (hasDialogue) control.dialogue = input.dialogue as ControlRequest['dialogue'];
       if (hasHistory) {
         if (!validToolHistory(input.history, control.tools)) return error(400, 'INVALID_REQUEST');
         control.history = input.history;
@@ -174,14 +181,7 @@ export async function handleIntent(
   ) return error(503, 'SERVICE_UNAVAILABLE');
 
   try {
-    const day = new Date().toISOString().slice(0, 10);
-    const address = request.headers.get('CF-Connecting-IP') ?? 'local';
-    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${day}:${address}`));
-    const clientKey = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
-    const quota = await environment.INTENT_QUOTA.getByName('global').fetch(new Request('https://quota/reserve', {
-      method: 'POST',
-      body: JSON.stringify({ clientKey }),
-    }));
+    const quota = await reserveQuota(request, environment.INTENT_QUOTA);
     if (quota.status === 429) {
       headers.set('Retry-After', quota.headers.get('Retry-After') ?? '60');
       return error(429, 'QUOTA_EXCEEDED');
@@ -196,6 +196,7 @@ export async function handleIntent(
   try {
     const messages: Record<string, unknown>[] = control ? [
       { role: 'system', content: `${TOOL_PROMPT}\n${RESULT_PROMPT}` },
+      ...(control.dialogue ?? []).map((message) => ({ role: message.role, content: message.content })),
       { role: 'user', content: JSON.stringify({ text, context: control.context }) },
     ] : [];
     if (control?.history) {

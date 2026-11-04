@@ -84,7 +84,7 @@ export function WindowButton({ id, part, controller, ready, gesturesEnabled }: W
       aria-label={PART_LABELS[id] + '，' + status}
       title={status}
     >
-      <span className="part-panel__window-name">{PART_LABELS[id]}</span>
+      <span className="part-panel__window-name">{PART_LABELS[id]}{percent > 0 && percent < 100 ? ` · ${percent}%` : ''}</span>
       <div className="part-panel__rocker" role="group" aria-label={PART_LABELS[id] + '升降'}>
         {(['raise', 'lower'] as const).map((direction) => (
           <button

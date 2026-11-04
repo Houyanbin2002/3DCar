@@ -4,13 +4,13 @@ import './voice-panel.css';
 
 const phaseLabels: Record<VoicePhase, string> = {
   off: '未开启', starting: '启动中', waiting: '等待唤醒', listening: '聆听指令',
-  thinking: '正在理解', speaking: '播报建议', confirming: '等待确认', executing: '执行中',
+  dialogue: '对话中 · 无需唤醒', thinking: '正在理解', speaking: '播报建议', confirming: '等待确认', executing: '执行中',
   error: '语音异常', unsupported: '暂不支持',
 };
 
 export function VoicePanel(props: VoiceControlOptions) {
   const { snapshot, start, stop, confirm, cancel } = useVoiceControl(props);
-  const busy = ['listening', 'thinking', 'speaking', 'executing'].includes(snapshot.phase);
+  const busy = ['listening', 'dialogue', 'thinking', 'speaking', 'executing'].includes(snapshot.phase);
 
   return (
     <section className="voice-panel" aria-label="小满语音控车" data-phase={snapshot.phase}>
@@ -37,13 +37,13 @@ export function VoicePanel(props: VoiceControlOptions) {
       )}
       {snapshot.phase === 'confirming' && (
         <div className="voice-panel__actions">
-          <button type="button" onClick={() => confirm(true)}>需要</button>
+          <button type="button" onClick={() => confirm(true)}>可以</button>
           <button type="button" onClick={() => confirm(false)}>不用</button>
         </div>
       )}
       {busy && <button type="button" className="voice-panel__cancel" onClick={cancel}>取消本轮</button>}
       <p className="voice-panel__example">“小满同学，打开左前车窗”</p>
-      <small className="voice-panel__privacy">智能建议需联网，相关识别文字会发送到模型服务。</small>
+      <small className="voice-panel__privacy">中文增强识别需联网，开启后音频与相关文字会发送到语音及模型服务。</small>
     </section>
   );
 }

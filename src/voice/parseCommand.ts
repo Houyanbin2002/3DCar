@@ -11,6 +11,7 @@ export const PART_LABELS: Record<PartId, string> = {
 type Target =
   | { kind: 'part'; partId: PartId }
   | { kind: 'group'; group: 'doors' | 'windows' };
+type TargetState = { open: boolean; openness?: number };
 
 const targets: [string, Target][] = [];
 for (const [partId, label] of Object.entries(PART_LABELS)) {
@@ -40,28 +41,35 @@ export type ParsedCommand =
 
 export type RoutedStep =
   | { source: 'rule'; confidence: 'high'; actions: VehicleAction[] }
+  | { source: 'confirmation'; confidence: 'low'; actions: VehicleAction[] }
   | { source: 'model'; confidence: 'low' | 'unmatched'; text: string };
 
 export function routeCommand(text: string): { cancelled: boolean; steps: RoutedStep[] } {
   if (cancellation.test(normalizeSpeech(text))) return { cancelled: true, steps: [] };
   const chunks = text.replace(/[，,。；;、！？!?]/gu, '|')
-    .split(/(然后|接着|再|并且|以及|还有|和|并|\|+)/u);
+    .split(/(然后|接着|再(?=打开|开启|关闭|关上|关掉|降下|升起|启动|熄火)|并且|以及|还有|和|并|\|+)/u);
   const steps: RoutedStep[] = [];
-  let inheritedOpen: boolean | undefined;
+  let inheritedState: TargetState | undefined;
   for (let index = 0; index < chunks.length; index += 2) {
     const original = chunks[index].trim();
     const clause = cleanClause(original);
     if (!clause) continue;
-    const shared = /^(和|以及|还有)$/u.test(chunks[index - 1] ?? '') ? inheritedOpen : undefined;
+    const shared = /^(和|以及|还有)$/u.test(chunks[index - 1] ?? '') ? inheritedState : undefined;
+    const position = parseWindowPosition(clause);
+    if (position?.requiresConfirmation) {
+      steps.push({ source: 'confirmation', confidence: 'low', actions: [position.action] });
+      inheritedState = undefined;
+      continue;
+    }
     const actions = parseClause(clause, shared);
     if (actions) {
       const previous = steps.at(-1);
       if (previous?.source === 'rule') previous.actions.push(...actions);
       else steps.push({ source: 'rule', confidence: 'high', actions });
       const last = actions.at(-1)!;
-      inheritedOpen = last.kind === 'engine' ? undefined : last.open;
+      inheritedState = last.kind === 'engine' ? undefined : { open: last.open, ...(last.openness !== undefined ? { openness: last.openness } : {}) };
     } else {
-      inheritedOpen = undefined;
+      inheritedState = undefined;
       const previous = steps.at(-1);
       if (previous?.source === 'model') previous.text += `，${original}`;
       else steps.push({ source: 'model', confidence: /门|窗|备箱|引擎|打开|关闭/u.test(clause) ? 'low' : 'unmatched', text: original });
@@ -87,7 +95,25 @@ function cleanClause(text: string): string {
     .replace(/(?:一下|好吗|谢谢|可以吗|行吗|吧)+$/u, '');
 }
 
-function parseClause(text: string, inheritedOpen?: boolean): VehicleAction[] | null {
+function parseWindowPosition(text: string): { action: VehicleAction; requiresConfirmation: boolean } | null {
+  const opening = '(?:打开|开启|降下|摇下|落下|开)';
+  const degree = '(一点点|一点|一条缝|四分之一|一半|半|完全|全部|到底)';
+  const windows: [string, Target][] = targets.filter(([, target]) => target.kind === 'group'
+    ? target.group === 'windows' : target.partId.endsWith('Window'));
+  windows.push(...['车窗', '窗户', '窗'].map((word): [string, Target] => [word, { kind: 'group', group: 'windows' }]));
+  for (const [word, target] of windows) {
+    const match = text.match(new RegExp(`^(?:${opening}${word}(?:到)?${degree}|${word}${opening}(?:到)?${degree}|(?:完全|全部)${opening}${word})$`, 'u'));
+    if (!match) continue;
+    const amount = match[1] ?? match[2] ?? '完全';
+    const openness = /^(一点点|一点|一条缝|四分之一)$/u.test(amount) ? 0.25 : /^(一半|半)$/u.test(amount) ? 0.5 : 1;
+    return { action: { ...target, open: true, openness }, requiresConfirmation: ['车窗', '窗户', '窗'].includes(word) };
+  }
+  return null;
+}
+
+function parseClause(text: string, inheritedState?: TargetState): VehicleAction[] | null {
+  const position = parseWindowPosition(text);
+  if (position) return position.requiresConfirmation ? null : [position.action];
   let rest = text;
   const actions: VehicleAction[] = [];
   while (rest) {
@@ -95,23 +121,24 @@ function parseClause(text: string, inheritedOpen?: boolean): VehicleAction[] | n
     if (engineMatch) {
       actions.push({ kind: 'engine', running: engineMatch[0].startsWith('启动') });
       rest = rest.slice(engineMatch[0].length);
-      inheritedOpen = undefined;
+      inheritedState = undefined;
       continue;
     }
     const verb = rest.match(verbs)?.[0];
     if (verb) rest = rest.slice(verb.length);
-    const open = verb ? /^(打开|开启|降下|摇下|落下|开)$/u.test(verb) : inheritedOpen;
+    const open = verb ? /^(打开|开启|降下|摇下|落下|开)$/u.test(verb) : inheritedState?.open;
     const target = targets.find(([word]) => rest.startsWith(word));
     if (open === undefined || !target) return null;
     const [word, definition] = target;
     const windowVerb = verb && /降|摇|落|升/u.test(verb);
     const isWindow = definition.kind === 'group'
       ? definition.group === 'windows' : definition.partId.endsWith('Window');
-    if (windowVerb && !isWindow) return null;
-    actions.push({ ...definition, open });
+    const openness = !verb ? inheritedState?.openness : undefined;
+    if ((windowVerb || openness !== undefined) && !isWindow) return null;
+    actions.push({ ...definition, open, ...(openness !== undefined ? { openness } : {}) });
     rest = rest.slice(word.length);
     // Sharing an action requires an explicit connector between the targets.
-    inheritedOpen = undefined;
+    inheritedState = undefined;
   }
   return actions.length ? actions : null;
 }
@@ -120,23 +147,23 @@ export function parseCommand(text: string): ParsedCommand {
   const normalized = normalizeSpeech(text);
   if (cancellation.test(normalized)) return { kind: 'cancelled' };
   const chunks = text.replace(/[，,。；;、！？!?]/gu, '|')
-    .split(/(然后|接着|再|并且|以及|还有|和|并|\|+)/u);
+    .split(/(然后|接着|再(?=打开|开启|关闭|关上|关掉|降下|升起|启动|熄火)|并且|以及|还有|和|并|\|+)/u);
   const actions: VehicleAction[] = [];
   const messages: string[] = [];
   let recognizedWords = false;
-  let inheritedOpen: boolean | undefined;
+  let inheritedState: TargetState | undefined;
   for (let index = 0; index < chunks.length; index += 2) {
     const clause = cleanClause(chunks[index]);
     if (!clause) continue;
     const connector = chunks[index - 1];
-    const shared = /^(和|以及|还有)$/u.test(connector ?? '') ? inheritedOpen : undefined;
+    const shared = /^(和|以及|还有)$/u.test(connector ?? '') ? inheritedState : undefined;
     const parsed = parseClause(clause, shared);
     if (parsed) {
       actions.push(...parsed);
       const last = parsed.at(-1)!;
-      inheritedOpen = last.kind === 'engine' ? undefined : last.open;
+      inheritedState = last.kind === 'engine' ? undefined : { open: last.open, ...(last.openness !== undefined ? { openness: last.openness } : {}) };
     } else {
-      inheritedOpen = undefined;
+      inheritedState = undefined;
       recognizedWords ||= /打开|关闭|开启|关|降|升|摇|门|窗|备箱|行李箱|引擎|发动机|启动/u.test(clause);
       const message = /^(?:打开|开启|关闭|关上|关掉|开|关|降下|升起)$/u.test(clause)
         ? '请说要操作哪个部件，例如打开左前门。'
@@ -158,6 +185,9 @@ export function describeAction(action: VehicleAction): string {
   const label = action.kind === 'part' ? PART_LABELS[action.partId]
     : action.group === 'doors' ? '所有车门' : '所有车窗';
   const isWindow = action.kind === 'part' ? action.partId.endsWith('Window') : action.group === 'windows';
+  if (isWindow && action.openness !== undefined && action.openness > 0 && action.openness < 1) {
+    return `将${label}打开至 ${Math.round(action.openness * 100)}% 开度`;
+  }
   const verb = isWindow ? (action.open ? '降下' : '升起') : (action.open ? '打开' : '关闭');
   return verb + label;
 }

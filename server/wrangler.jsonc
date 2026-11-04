@@ -5,7 +5,7 @@
   "compatibility_date": "2026-11-04",
   "vars": {
     "ALLOWED_ORIGINS": "http://localhost:5173,http://127.0.0.1:5173",
-    "CLIENT_REQUESTS_PER_MINUTE": "5",
+    "CLIENT_REQUESTS_PER_MINUTE": "20",
     "DAILY_REQUEST_LIMIT": "100",
     "MODEL_TIMEOUT_MS": "8000"
   },
