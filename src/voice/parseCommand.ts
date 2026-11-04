@@ -75,7 +75,7 @@ export function normalizeSpeech(text: string): string {
 }
 
 export function extractWakeCommand(text: string): string | null {
-  const wake = /小[\s\p{P}]*满[\s\p{P}]*小[\s\p{P}]*满/gu;
+  const wake = /小[\s\p{P}]*满[\s\p{P}]*同[\s\p{P}]*学/gu;
   const matches = [...text.matchAll(wake)];
   const match = matches.at(-1);
   return match ? text.slice(match.index + match[0].length) : null;

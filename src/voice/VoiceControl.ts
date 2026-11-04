@@ -37,7 +37,7 @@ export interface VoiceControlOptions {
 }
 
 const defaultTiming = { wakeMs: 5_000, settleMs: 1_000, confirmMs: 5_000, turnMs: 20_000, restartMs: 300 };
-type TimerName = 'wake' | 'settle' | 'confirm' | 'turn' | 'restart';
+type TimerName = 'wake' | 'settle' | 'confirm' | 'turn' | 'restart' | 'fragment';
 const defaultClock: VoiceClock = {
   schedule(callback, milliseconds) {
     const timer = setTimeout(callback, milliseconds);
@@ -70,6 +70,7 @@ export class VoiceControl {
   private speechActive = false;
   private hasInterim = false;
   private commandText = '';
+  private wakeFragment = '';
   private pendingTools: ToolExecutionPlan | null = null;
   private steps: RoutedStep[] = [];
   private abort = new AbortController();
@@ -85,7 +86,7 @@ export class VoiceControl {
     this.timing = { ...defaultTiming, ...options.timing };
     this.snapshot = {
       phase: this.input.supported ? 'off' : 'unsupported', enabled: false,
-      transcript: '', feedback: [], message: this.input.supported ? '开启后说“小满小满”唤醒。' : errors.unsupported,
+      transcript: '', feedback: [], message: this.input.supported ? '开启后说“小满同学”唤醒。' : errors.unsupported,
     };
   }
 
@@ -110,7 +111,7 @@ export class VoiceControl {
   };
 
   readonly cancel = (): void => {
-    if (this.snapshot.enabled) this.finish('本轮已取消，请说“小满小满”重新唤醒。');
+    if (this.snapshot.enabled) this.finish('本轮已取消，请说“小满同学”重新唤醒。');
   };
 
   readonly confirm = (accepted: boolean): void => {
@@ -144,8 +145,9 @@ export class VoiceControl {
     this.pendingTools = null;
     this.steps = [];
     this.commandText = '';
+    this.wakeFragment = '';
     this.hasInterim = false;
-    for (const name of ['wake', 'settle', 'confirm', 'turn'] as const) this.cancelTimer(name);
+    for (const name of ['wake', 'settle', 'confirm', 'turn', 'fragment'] as const) this.cancelTimer(name);
   }
 
   private current(turn: number): boolean {
@@ -169,7 +171,7 @@ export class VoiceControl {
       this.input.start({
         onStart: () => {
           if (active() && this.snapshot.phase === 'starting') {
-            this.update({ phase: 'waiting', message: '等待唤醒，说“小满小满”。' });
+            this.update({ phase: 'waiting', message: '等待唤醒，说“小满同学”。' });
           }
         },
         onEnd: () => {
@@ -197,7 +199,13 @@ export class VoiceControl {
   }
 
   private inputError(code: string): void {
-    if (code === 'no-speech' || code === 'aborted') return;
+    if (code === 'aborted') return;
+    if (code === 'no-speech') {
+      if (this.snapshot.phase === 'waiting') {
+        this.update({ message: '暂未识别到语音，请检查麦克风输入，再说“小满同学”。' });
+      }
+      return;
+    }
     this.update({ enabled: false, phase: code === 'unsupported' ? 'unsupported' : 'error',
       message: errors[code] ?? '语音服务启动失败，请重新开启。' });
     this.clearTurn();
@@ -207,7 +215,7 @@ export class VoiceControl {
   private beginTurn(remainder: string): void {
     this.clearTurn();
     this.update({ phase: 'listening', transcript: '', feedback: [], message: '我在听，请说控车指令。' });
-    this.schedule('wake', this.timing.wakeMs, () => this.finish('本次聆听超时，请再说一次“小满小满”。'));
+    this.schedule('wake', this.timing.wakeMs, () => this.finish('本次聆听超时，请再说一次“小满同学”。'));
     this.schedule('turn', this.timing.turnMs, () => this.finish('本轮聆听已超时，请说一句简短的控车指令。'));
     if (normalizeSpeech(remainder)) this.appendCommand(remainder);
   }
@@ -221,9 +229,16 @@ export class VoiceControl {
 
   private receive(update: TranscriptUpdate): void {
     for (const text of update.finals) {
-      const remainder = extractWakeCommand(text);
+      const heard = this.snapshot.phase === 'waiting' ? this.wakeFragment + text : text;
+      const remainder = extractWakeCommand(heard);
       if (remainder !== null) {
         this.beginTurn(remainder);
+      } else if (this.snapshot.phase === 'waiting') {
+        const normalized = normalizeSpeech(heard);
+        this.wakeFragment = ['小满同', '小满', '小'].find((prefix) => normalized.endsWith(prefix)) ?? '';
+        this.cancelTimer('fragment');
+        if (this.wakeFragment) this.schedule('fragment', 2_000, () => { this.wakeFragment = ''; });
+        this.update({ transcript: text });
       } else if (this.snapshot.phase === 'listening') {
         this.appendCommand(text);
       } else if (this.snapshot.phase === 'confirming') {
@@ -237,6 +252,9 @@ export class VoiceControl {
       }
     }
     this.hasInterim = Boolean(normalizeSpeech(update.interim));
+    if (this.snapshot.phase === 'waiting' && this.hasInterim) {
+      this.update({ transcript: this.wakeFragment + update.interim });
+    }
     if (this.snapshot.phase === 'listening' && this.hasInterim) {
       this.cancelTimer('wake');
       this.cancelTimer('settle');

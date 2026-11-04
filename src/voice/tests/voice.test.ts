@@ -139,14 +139,51 @@ test('取消与否定阻止误提取动作，间接表达才进入模型', () =>
   assert.equal(parseCommand('车里有点闷热，想透透气').kind, 'indirect');
   assert.equal(parseCommand('想透透气').kind, 'indirect');
   assert.equal(parseCommand('嗯').kind, 'clarify');
-  assert.equal(extractWakeCommand('小满，小满，打开左前窗'), '，打开左前窗');
+  assert.equal(extractWakeCommand('小满，同学，打开左前窗'), '，打开左前窗');
+});
+
+test('小满同学支持标点与空白，完整唤醒词才匹配', () => {
+  assert.equal(extractWakeCommand('小满同学'), '');
+  assert.equal(extractWakeCommand('小 满 同 学，打开左前窗'), '，打开左前窗');
+  assert.equal(extractWakeCommand('小满，同学，打开左前窗'), '，打开左前窗');
+  assert.equal(extractWakeCommand('小满打开左前窗'), null);
+  assert.equal(extractWakeCommand('小满小满打开左前窗'), null);
+});
+
+test('唤醒词拆成多段时短时间拼接，过期片段不会唤醒', async () => {
+  for (const expired of [false, true]) {
+    const s = setup();
+    s.input.say('小满');
+    s.clock.advance(expired ? 2_001 : 200);
+    s.input.say('同学，打开左前门');
+    s.clock.advance(1_000);
+    await flush();
+    assert.equal(s.calls.length, expired ? 0 : 1);
+    assert.equal(s.control.getSnapshot().phase, 'waiting');
+    s.control.stop();
+  }
+});
+
+test('等待唤醒时显示识别文字，无语音返回时保留麦克风提示', () => {
+  const s = setup();
+  s.input.say('', '这里有点声音');
+  assert.equal(s.control.getSnapshot().transcript, '这里有点声音');
+  assert.equal(s.calls.length, 0);
+  assert.equal(s.intents.length, 0);
+  s.input.error('no-speech');
+  s.input.end();
+  s.clock.advance(300);
+  assert.equal(s.control.getSnapshot().enabled, true);
+  assert.equal(s.control.getSnapshot().phase, 'waiting');
+  assert.match(s.control.getSnapshot().message, /麦克风/u);
+  s.control.stop();
 });
 
 test('未唤醒时不调用车辆或模型，中间结果不执行', () => {
   const s = setup();
   s.input.say('打开左前门');
   s.input.say('车里有点闷热');
-  s.input.say('', '小满小满打开左前门');
+  s.input.say('', '小满同学打开左前门');
   s.clock.advance(2_000);
   assert.equal(s.calls.length, 0);
   assert.equal(s.intents.length, 0);
@@ -156,7 +193,7 @@ test('未唤醒时不调用车辆或模型，中间结果不执行', () => {
 
 test('同段唤醒与动作一次提交，第二轮必须重新唤醒', async () => {
   const s = setup();
-  s.input.say('小满小满，打开左前门');
+  s.input.say('小满同学，打开左前门');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.calls.length, 1);
@@ -164,7 +201,7 @@ test('同段唤醒与动作一次提交，第二轮必须重新唤醒', async ()
   s.input.say('关闭左前门');
   s.clock.advance(2_000);
   assert.equal(s.calls.length, 1);
-  s.input.say('小满小满关闭左前门');
+  s.input.say('小满同学关闭左前门');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.calls.length, 2);
@@ -174,10 +211,10 @@ test('同段唤醒与动作一次提交，第二轮必须重新唤醒', async ()
 
 test('5 秒未开始说指令时超时，开始说话后可继续完成', async () => {
   const s = setup();
-  s.input.say('小满小满');
+  s.input.say('小满同学');
   s.clock.advance(5_000);
   assert.match(s.control.getSnapshot().message, /超时/u);
-  s.input.say('小满小满');
+  s.input.say('小满同学');
   s.clock.advance(4_500);
   s.input.speechStart();
   s.input.say('', '打开左');
@@ -193,7 +230,7 @@ test('5 秒未开始说指令时超时，开始说话后可继续完成', async 
 
 test('一轮多段结果聚合，正在说话时等待后续分句', async () => {
   const s = setup();
-  s.input.say('小满小满，打开前备箱');
+  s.input.say('小满同学，打开前备箱');
   s.clock.advance(500);
   s.input.speechStart();
   s.clock.advance(1_000);
@@ -209,12 +246,12 @@ test('一轮多段结果聚合，正在说话时等待后续分句', async () =>
 
 test('部分有效先执行规则动作，模糊片段交给模型追问', async () => {
   const s = setup();
-  s.input.say('小满小满打开左前门再打开');
+  s.input.say('小满同学打开左前门再打开');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.calls[0].length, 1);
   assert.match(s.control.getSnapshot().message, /哪个部件/u);
-  s.input.say('小满小满开车窗');
+  s.input.say('小满同学开车窗');
   s.clock.advance(1_000);
   await flush();
   assert.match(s.control.getSnapshot().message, /哪扇/u);
@@ -224,7 +261,7 @@ test('部分有效先执行规则动作，模糊片段交给模型追问', async
 
 test('单轮收集上限避免卡在聆听状态', () => {
   const s = setup();
-  s.input.say('小满小满');
+  s.input.say('小满同学');
   s.input.speechStart();
   s.clock.advance(20_000);
   assert.equal(s.control.getSnapshot().phase, 'waiting');
@@ -236,10 +273,10 @@ test('自然结束后恢复识别，旧会话回调失效', async () => {
   const s = setup();
   const old = s.input.events!;
   s.input.end();
-  old.onTranscript({ finals: ['小满小满打开右前门'], interim: '' });
+  old.onTranscript({ finals: ['小满同学打开右前门'], interim: '' });
   s.clock.advance(300);
   assert.equal(s.input.starts, 2);
-  old.onTranscript({ finals: ['小满小满打开左前门'], interim: '' });
+  old.onTranscript({ finals: ['小满同学打开左前门'], interim: '' });
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.calls.length, 0);
@@ -273,7 +310,7 @@ test('权限与网络异常停止恢复，用户可以重试', () => {
 
 test('模型只提出建议，确认一次后才降指定窗口', async () => {
   const s = setup();
-  s.input.say('小满小满，车里有点闷热');
+  s.input.say('小满同学，车里有点闷热');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.intents.length, 1);
@@ -293,7 +330,7 @@ test('模型只提出建议，确认一次后才降指定窗口', async () => {
 test('否定和超时清除待确认动作', async () => {
   for (const mode of ['negative', 'timeout']) {
     const s = setup();
-    s.input.say('小满小满想透透气');
+    s.input.say('小满同学想透透气');
     s.clock.advance(1_000);
     await flush();
     if (mode === 'negative') s.input.say('不用');
@@ -309,7 +346,7 @@ test('否定和超时清除待确认动作', async () => {
 test('播报时暂停识别，播报结束后才计确认时间', async () => {
   const audio = deferred<void>();
   const s = setup({ output: { speak: () => audio.promise } });
-  s.input.say('小满小满车里闷热');
+  s.input.say('小满同学车里闷热');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.control.getSnapshot().phase, 'speaking');
@@ -329,10 +366,10 @@ test('关闭语音或重新唤醒使迟到的模型响应失效', async () => {
   for (const mode of ['stop', 'wake']) {
     const model = deferred<{ intent: 'ventilate' }>();
     const s = setup({ intent: () => model.promise });
-    s.input.say('小满小满车里闷热');
+    s.input.say('小满同学车里闷热');
     s.clock.advance(1_000);
     if (mode === 'stop') s.control.stop();
-    else s.input.say('小满小满');
+    else s.input.say('小满同学');
     model.resolve({ intent: 'ventilate' });
     await flush();
     assert.equal(s.control.getSnapshot().phase, mode === 'stop' ? 'off' : 'listening');
@@ -344,11 +381,11 @@ test('关闭语音或重新唤醒使迟到的模型响应失效', async () => {
 
 test('接口失败仍可在下一轮执行明确指令', async () => {
   const s = setup({ intent: async () => { throw new Error('offline'); } });
-  s.input.say('小满小满车里闷热');
+  s.input.say('小满同学车里闷热');
   s.clock.advance(1_000);
   await flush();
   assert.match(s.control.getSnapshot().message, /暂时不可用/u);
-  s.input.say('小满小满打开左前窗');
+  s.input.say('小满同学打开左前窗');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.calls.length, 1);
@@ -359,14 +396,14 @@ test('按当前状态选择车窗，四窗已降下时只反馈', async () => {
   const s = setup();
   await s.vehicle.execute([{ kind: 'part', partId: 'frontLeftWindow', open: true }]);
   s.calls.length = 0;
-  s.input.say('小满小满车里闷热');
+  s.input.say('小满同学车里闷热');
   s.clock.advance(1_000);
   await flush();
   assert.match(s.spoken[0], /右前窗/u);
   s.control.confirm(false);
   await s.vehicle.execute([{ kind: 'group', group: 'windows', open: true }]);
   s.calls.length = 0;
-  s.input.say('小满小满车里闷热');
+  s.input.say('小满同学车里闷热');
   s.clock.advance(1_000);
   await flush();
   assert.match(s.control.getSnapshot().message, /已经降下/u);
@@ -379,7 +416,7 @@ test('停止会取消未下发动作，已结束轮次的执行结果不覆盖 U
   const s = setup();
   let signal: AbortSignal | undefined;
   s.vehicle.execute = (_actions, options) => { signal = options?.signal; return pending.promise; };
-  s.input.say('小满小满打开左前门再打开后备箱');
+  s.input.say('小满同学打开左前门再打开后备箱');
   s.clock.advance(1_000);
   s.control.stop();
   assert.equal(signal?.aborted, true);
@@ -390,13 +427,13 @@ test('停止会取消未下发动作，已结束轮次的执行结果不覆盖 U
 
 test('unsupported 意图与车辆未就绪都只反馈', async () => {
   const s = setup({ intent: async () => ({ intent: 'unsupported' }) });
-  s.input.say('小满小满把车弄好看一点');
+  s.input.say('小满同学把车弄好看一点');
   s.clock.advance(1_000);
   await flush();
   assert.match(s.control.getSnapshot().message, /没能理解/u);
   const previous = s.vehicle.getSnapshot();
   s.vehicle.getSnapshot = () => ({ ...previous, ready: false });
-  s.input.say('小满小满打开左前门');
+  s.input.say('小满同学打开左前门');
   s.clock.advance(1_000);
   await flush();
   assert.match(s.control.getSnapshot().message, /加载/u);
@@ -419,13 +456,13 @@ test('识别适配器按结果索引去重，旧 native 回调也失效', () => 
     onStart() {}, onEnd() {}, onSpeechStart() {}, onSpeechEnd() {}, onError() {},
     onTranscript: (update) => delivered.push(...update.finals),
   });
-  const results = [{ isFinal: true, 0: { transcript: '小满小满' } }];
+  const results = [{ isFinal: true, 0: { transcript: '小满同学' } }];
   const old = native.onresult!;
   old({ resultIndex: 0, results });
   old({ resultIndex: 0, results });
   results.push({ isFinal: true, 0: { transcript: '打开左前门' } });
   old({ resultIndex: 1, results });
-  assert.deepEqual(delivered, ['小满小满', '打开左前门']);
+  assert.deepEqual(delivered, ['小满同学', '打开左前门']);
   input.stop();
   results.push({ isFinal: true, 0: { transcript: '关闭所有车窗' } });
   old({ resultIndex: 2, results });
@@ -498,7 +535,7 @@ test('运行时注册温控工具后，下次请求自动包含定义并能执�
     confirmation: 'always', context: () => ({ celsius: temperature }),
     prepare: (args) => ({ label: `将空调调到${args.celsius}度`, execute: async () => { temperature = args.celsius as number; return '温度设置完成。'; } }),
   });
-  s.input.say('小满小满，空调调到二十四度');
+  s.input.say('小满同学，空调调到二十四度');
   s.clock.advance(1_000);
   await flush();
   assert.equal(temperature, 20);
@@ -515,7 +552,7 @@ test('模型指定的任意已注册部件按顺序执行，无通风标签映�
     { id: 'first', name: 'set_vehicle_part', arguments: { partId: 'frunk', open: true } },
     { id: 'second', name: 'set_engine_state', arguments: { running: true } },
   ], reply: '' }) });
-  s.input.say('小满小满，请把前面的储物空间掀开并让车准备好');
+  s.input.say('小满同学，请把前面的储物空间掀开并让车准备好');
   s.clock.advance(1_000);
   await flush();
   assert.equal(s.calls.length, 0);
@@ -582,7 +619,7 @@ test('只读工具按登记策略直接执行，车辆动作仍由确认策略�
     confirmation: 'never',
     prepare: () => ({ label: '读取状态', execute: async () => { readCount++; return '状态读取完成。'; } }),
   });
-  s.input.say('小满小满现在的状态怎么样');
+  s.input.say('小满同学现在的状态怎么样');
   s.clock.advance(1_000);
   await flush();
   assert.equal(readCount, 1);
@@ -613,7 +650,7 @@ test('语音确认一次后完成三项调用和失败项重试，最终恢复�
       } }),
     });
   }
-  s.input.say('小满小满，请启动三个测试模块');
+  s.input.say('小满同学，请启动三个测试模块');
   s.clock.advance(1_000);
   await flush();
   assert.deepEqual(attempts, [0, 0, 0]);

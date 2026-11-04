@@ -42,7 +42,7 @@ export function VoicePanel(props: VoiceControlOptions) {
         </div>
       )}
       {busy && <button type="button" className="voice-panel__cancel" onClick={cancel}>取消本轮</button>}
-      <p className="voice-panel__example">“小满小满，打开左前车窗”</p>
+      <p className="voice-panel__example">“小满同学，打开左前车窗”</p>
       <small className="voice-panel__privacy">智能建议需联网，相关识别文字会发送到模型服务。</small>
     </section>
   );
