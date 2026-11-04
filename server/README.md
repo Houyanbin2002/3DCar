@@ -1,6 +1,6 @@
 # 3DCar 模型接口
 
-本分支实现独立部署的意图接口，对齐 [SPEC.md](./SPEC.md) 与 `shared/intent.ts`。前端识别唤醒词并处理明确指令，接口将间接表达分类为通风或不支持，页面负责追问和确认。
+本分支实现独立部署的模型接口，对齐 [SPEC.md](./SPEC.md)、`shared/control.ts` 和兼容的 `shared/intent.ts`。前端优先处理完整规则，接口将当前工具定义通过 Function Calling 注入千问，返回函数调用或简短追问。页面校验后执行已登记的工具。
 
 ## 本地开发与验证
 
@@ -52,6 +52,8 @@ Qwen Omni 的文本输出、JSON 模式及思考参数依据阿里云官方说�
 
 ## 接口与故障
 
-成功返回 `{"intent":"ventilate"}` 或 `{"intent":"unsupported"}`。错误返回固定的 `error.code`，对应状态和限制详见 SPEC。429 附 `Retry-After`，允许来源的错误响应也带跨域头。前端在超时或错误时提示用户说出具体部件指令。
+`POST /api/intent` 接收带 `text`、`tools`、`context` 的新请求，返回 `toolCalls` 与 `reply`。工具定义由页面注册表动态生成，最多 16 项，参数支持字符串枚举、数值范围和布尔值。工具请求体最多 32 KiB，模型输出最多 512 tokens、8 条调用。返回的名称和实参必须符合本次工具结构。
+
+只含 `text` 的旧请求继续返回 `ventilate` 或 `unsupported`，保持 4 KiB 输入和 64 tokens 输出上限。错误返回固定 `error.code`，429 附 `Retry-After`，允许来源的错误响应也带跨域头。
 
 来源校验、服务端调用频率和全站日额度一起约束公开演示接口。部署区域、模型服务商和额度应配合实际演示规模配置。

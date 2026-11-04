@@ -229,3 +229,58 @@ test('deadline covers a stalled model response stream', async () => {
   const response = await handleIntent(request(), environment({ MODEL_TIMEOUT_MS: '10' }), async () => new Response(new ReadableStream()));
   assert.equal(response.status, 504);
 });
+
+const runtimeTool = {
+  type: 'function', function: {
+    name: 'set_cabin_temperature', description: '运行时新增的温度工具。',
+    parameters: { type: 'object', additionalProperties: false, required: ['celsius'], properties: { celsius: { type: 'number', minimum: 16, maximum: 30 } } },
+  },
+};
+
+function toolRequest() {
+  return request(JSON.stringify({ text: '空调调到24度', tools: [runtimeTool], context: { temperature: 20 } }));
+}
+
+function toolResponse(name = 'set_cabin_temperature', args: unknown = { celsius: 24 }) {
+  return Response.json({ choices: [{ finish_reason: 'tool_calls', message: {
+    content: null, tool_calls: [{ id: 'temperature-call', type: 'function', function: { name, arguments: JSON.stringify(args) } }],
+  } }] });
+}
+
+test('injects runtime tools into Qwen and returns validated function calls', async () => {
+  const response = await handleIntent(toolRequest(), environment({ MODEL_NAME: 'qwen3.8-omni-flash' }), async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.deepEqual(body.tools, [runtimeTool]);
+    assert.equal(body.tool_choice, 'auto');
+    assert.equal(body.reasoning_effort, 'none');
+    assert.equal(body.max_tokens, 512);
+    assert.equal(body.response_format, undefined);
+    assert.deepEqual(JSON.parse(body.messages[1].content), { text: '空调调到24度', context: { temperature: 20 } });
+    return toolResponse();
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { toolCalls: [{ id: 'temperature-call', name: 'set_cabin_temperature', arguments: { celsius: 24 } }], reply: '' });
+});
+
+test('ambiguous or unsupported expressions may return clarification with no tool calls', async () => {
+  const response = await handleIntent(toolRequest(), environment(), async () => modelResponse('你想设置多少度？'));
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { toolCalls: [], reply: '你想设置多少度？' });
+});
+
+test('rejects unknown tool names, extra arguments and values outside runtime schema', async () => {
+  for (const upstream of [
+    toolResponse('unregistered'), toolResponse('set_cabin_temperature', { celsius: 99 }),
+    toolResponse('set_cabin_temperature', { celsius: '24' }), toolResponse('set_cabin_temperature', { celsius: 24, extra: true }),
+  ]) {
+    const response = await handleIntent(toolRequest(), environment(), async () => upstream);
+    assert.equal(response.status, 502);
+  }
+});
+
+test('rejects invalid runtime schemas before requesting the model', async () => {
+  for (const tools of [[], [runtimeTool, runtimeTool], [{ ...runtimeTool, function: { ...runtimeTool.function, name: 'invalid tool name' } }]]) {
+    const response = await handleIntent(request(JSON.stringify({ text: '调空调', tools, context: {} })), environment(), unexpectedModelCall);
+    assert.equal(response.status, 400);
+  }
+});

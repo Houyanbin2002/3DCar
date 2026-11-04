@@ -2,23 +2,25 @@
 
 | 项目 | 约定 |
 | --- | --- |
-| 版本与日期 | v1.1，2026-11-04 |
+| 版本与日期 | v1.2，2026-11-04 |
 | 分支与工作区 | `codex/intent-api`，`3DCar-intent-api` |
 | 需求依据 | 需求 v1.3 的 §4.4、§5、A13–A15，架构 v1.2 的 §5 |
-| 公共契约 | `shared/intent.ts` |
+| 公共契约 | `shared/control.ts` 与兼容的 `shared/intent.ts` |
 | 本分支路径 | `server/**` |
 | 运行方式 | Cloudflare Worker 接受 HTTPS 请求，单个 Durable Object 原子预留调用额度 |
 
 ## 1. 行为与职责
 
-页面完成唤醒和本地规则判定后，把本轮转写提交到接口。接口只判定 `ventilate` 或 `unsupported`。前端选择车窗、生成追问，并在用户确认后执行动作。
+页面完成唤醒后，完整匹配的规则直接执行。未匹配或低置信度片段携带当前工具定义与状态提交到模型接口。模型通过 Function Calling 返回具体函数名和参数，执行器分发到页面已注册的方法，车辆变更在确认后执行。
+
+带 `tools` 和 `context` 的请求使用工具调用契约。工具最多 16 个，Schema 支持对象参数、字符串枚举、数值范围和布尔值，请求体上限 32 KiB。模型输出上限 512 tokens，一次最多 8 个调用。后端与浏览器分别验证函数和参数。
 
 服务端适配通过 Bearer Key 鉴权、使用 `messages` 输入和 `choices[0].message.content` 输出的 Chat Completions 兼容接口。完整 HTTPS 地址、模型标识和 Key 从运行环境读取。发布时按所选服务商验证兼容性和真实中文意图效果。
 
 ## 2. HTTP 契约
 
-- 路径为 `POST /api/intent`。媒体类型为 `application/json`，请求对象只能包含字符串 `text`。文本去除两端空白后，长度为 1–1000 个 Unicode 码点。实际请求体上限为 4096 字节，读取请求体的等待上限为 5 秒。
-- 成功返回 HTTP 200 和 `{"intent":"ventilate"}` 或 `{"intent":"unsupported"}`，遵守公共类型。错误返回 `{"error":{"code":"错误代码"}}`。
+- 路径为 `POST /api/intent`，媒体类型为 `application/json`。新请求包含 `text`、`tools`、`context`。文本去除两端空白后长度为 1–1000 个 Unicode 码点，读取请求体的等待上限为 5 秒。旧请求只含 `text`，保持 4096 字节上限。
+- 成功返回 HTTP 200，新契约为 `toolCalls` 与 `reply`，工具调用包含 `id`、`name`、`arguments`。无调用时 `reply` 是简短追问或提示。旧契约返回 `ventilate` 或 `unsupported`。错误返回固定 `error.code`。
 - HTTP 状态分别为 400 输入格式错误、403 来源不允许、404 路径不存在、405 方法不支持、408 请求体读取超时、413 请求体过大、415 媒体类型不支持、429 配额不足、502 上游失败或输出非法、503 服务配置或配额服务不可用、504 模型调用超时。
 - JSON 响应使用 `Cache-Control: no-store`。允许来源的成功和失败响应均带跨域响应头。429 同时提供 `Retry-After`。
 
@@ -36,7 +38,7 @@
 
 兜底模型选定为阿里云 `qwen3.8-omni-flash`，从环境配置读取模型名称、完整 HTTP 接口和 Key。该模型使用文本输出并通过 `reasoning_effort: "none"` 关闭思考，完成单轮意图判定。[模型参数说明](https://help.aliyun.com/en/model-studio/qwen-omni)
 
-模型使用非流式 JSON 输出，输出 token 上限为 64。只有精确的单字段 JSON 对象和两个枚举值可通过校验。输出截断、意外字段、解释文字和非法 JSON 都返回 502。接口在约 8 秒内完成上游请求及响应体读取，响应体上限为 64 KiB，超时返回 504。一次已获配额的请求至多发起一次模型调用，重定向作为上游失败处理。
+新链路使用非流式 Function Calling，模型通过当前 `tools` 自动选函数，`finish_reason` 为 `tool_calls` 时验证所有调用，为 `stop` 时显示追问。意图、车辆状态和工具能力随本次请求注入。一次已获配额的请求至多调用一次模型，保持约 8 秒超时、64 KiB 上游响应上限及拒绝重定向策略。旧分类契约使用单字段 JSON 输出。
 
 ## 5. 配额与故障
 
