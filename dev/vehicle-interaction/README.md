@@ -9,6 +9,8 @@ npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
 
 打开 [车辆交互验证页](http://127.0.0.1:5174/dev/vehicle-interaction/)。页面装配 `Showroom`、`createVehicleController()` 和 `PartPanel`，可独立检查十个部件的开合、车身点击和半透明小窗。右侧模拟动力状态由控制器的引擎动作更新，供语音分支接线。
 
+车辆分支合入 `codex/integration` 后，项目正式首页也已装配同一套功能。`src/ui/VehicleShowroom.tsx` 为两个入口共用的装配组件，布局样式位于 `src/ui/vehicle-showroom.css`。
+
 ## 当前交互
 
 - 白色展厅和半透明控制小窗，车身使用清漆材质、柔光环境反射，地面显示柔化倒影和阴影。

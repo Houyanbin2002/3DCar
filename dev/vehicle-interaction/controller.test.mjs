@@ -11,6 +11,7 @@ let bindWipers;
 before(async () => {
   vite = await createServer({
     appType: 'custom',
+    optimizeDeps: { noDiscovery: true, include: [] },
     server: { middlewareMode: true, hmr: false, watch: null },
   });
   ({ createVehicleController } = await vite.ssrLoadModule('/src/vehicle/vehicleController.ts'));
