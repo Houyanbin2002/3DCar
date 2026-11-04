@@ -2,6 +2,7 @@ import {
   Box3, Group, MathUtils, Mesh, MeshStandardMaterial, Vector3,
 } from 'three';
 import type { Material, Object3D } from 'three';
+import { acceleratedRaycast, MeshBVH } from 'three-mesh-bvh';
 import { PART_IDS, WINDOW_IDS } from '../contracts/vehicle';
 import type { PartId } from '../contracts/vehicle';
 import { MODEL_3_PARTS } from './model3Parts';
@@ -117,6 +118,11 @@ export function prepareTesla(source: Group) {
   const paintNames = ['primary', 'paint_black', 'putih_putih0_0', 'putih002_putih0_0'];
   asset.traverse((object) => {
     if (!(object instanceof Mesh)) return;
+    // Geometry is shared with the cached GLB. Build once without reordering its indices.
+    if (!object.geometry.boundsTree) {
+      object.geometry.boundsTree = new MeshBVH(object.geometry, { indirect: true });
+    }
+    object.raycast = acceleratedRaycast;
     meshes.push(object);
     const id = owners.get(object);
     const isWindow = id !== undefined && windowSet.has(id);

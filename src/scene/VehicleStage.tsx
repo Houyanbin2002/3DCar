@@ -79,8 +79,16 @@ export function VehicleStage({ onDriverChange, onPartClick, buttons }: StageProp
   const orbit = useRef<OrbitControls | null>(null);
   const reportPick = useEffectEvent(onPartClick);
   const reportDriver = useEffectEvent(onDriverChange);
-  const pickRay = useMemo(() => new Raycaster(), []);
-  const markerRay = useMemo(() => new Raycaster(), []);
+  const pickRay = useMemo(() => {
+    const ray = new Raycaster();
+    ray.firstHitOnly = true;
+    return ray;
+  }, []);
+  const markerRay = useMemo(() => {
+    const ray = new Raycaster();
+    ray.firstHitOnly = true;
+    return ray;
+  }, []);
   const screen = useMemo(() => new Vector2(), []);
   const point = useMemo(() => new Vector3(), []);
   const projected = useMemo(() => new Vector3(), []);

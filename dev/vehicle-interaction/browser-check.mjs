@@ -9,9 +9,12 @@ const executable = process.env.BROWSER_PATH
   || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const browserName = basename(executable, '.exe');
 const profile = await mkdtemp(join(tmpdir(), '3dcar-browser-'));
+const rendererArguments = process.env.SOFTWARE_WEBGL === '0'
+  ? []
+  : ['--enable-unsafe-swiftshader', '--use-angle=swiftshader'];
 const browser = spawn(executable, [
   '--headless=new', '--disable-background-networking', '--no-first-run',
-  '--no-default-browser-check', '--enable-unsafe-swiftshader', '--use-angle=swiftshader',
+  '--no-default-browser-check', ...rendererArguments,
   '--remote-debugging-port=0', '--user-data-dir=' + profile, 'about:blank',
 ], { windowsHide: true, stdio: 'ignore' });
 
