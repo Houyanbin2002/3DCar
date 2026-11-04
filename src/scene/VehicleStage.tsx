@@ -2,16 +2,16 @@ import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef } from 'rea
 import type { RefObject } from 'react';
 import { useFrame, useLoader, useThree } from '@react-three/fiber';
 import {
-  Matrix4, PerspectiveCamera, PMREMGenerator, Raycaster, Vector2, Vector3,
+  Matrix4, Mesh, PerspectiveCamera, Raycaster, Vector2, Vector3,
 } from 'three';
-import type { Intersection, Object3D } from 'three';
+import type { Intersection, Material, Object3D } from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import type { PartId, ShowroomProps } from '../contracts/vehicle';
 import { PART_LABELS, partVerb } from '../vehicle/partLabels';
 import { MODEL_3_URL } from './model3Parts';
 import { prepareTesla } from './teslaModel';
+import { StudioEnvironment } from './StudioEnvironment';
 
 export const INITIAL_CAMERA: [number, number, number] = [7.3, 2.55, 6.6];
 
@@ -19,53 +19,13 @@ function visibleHit(hit: Intersection) {
   for (let node: Object3D | null = hit.object; node; node = node.parent) {
     if (!node.visible) return false;
   }
+  if (hit.object instanceof Mesh) {
+    const material: Material | undefined = Array.isArray(hit.object.material)
+      ? hit.object.material[hit.face?.materialIndex ?? 0]
+      : hit.object.material;
+    if (material?.clippingPlanes?.some((plane) => plane.distanceToPoint(hit.point) < 0)) return false;
+  }
   return true;
-}
-
-function StudioLights() {
-  const { gl, scene } = useThree();
-  useEffect(() => {
-    const room = new RoomEnvironment();
-    const generator = new PMREMGenerator(gl);
-    const light = generator.fromScene(room, 0.06);
-    scene.environment = light.texture;
-    scene.environmentIntensity = 0.88;
-    room.dispose();
-    generator.dispose();
-    const autoUpdate = gl.shadowMap.autoUpdate;
-    gl.shadowMap.autoUpdate = false;
-    gl.shadowMap.needsUpdate = true;
-    return () => {
-      scene.environment = null;
-      gl.shadowMap.autoUpdate = autoUpdate;
-      light.dispose();
-    };
-  }, [gl, scene]);
-
-  return (
-    <>
-      <color attach="background" args={['#101115']} />
-      <fog attach="fog" args={['#101115', 15, 37]} />
-      <hemisphereLight args={['#d8e4ff', '#42434b', 0.56]} />
-      <directionalLight position={[-6, 5, -5]} color="#c3d9ff" intensity={1.35} />
-      <spotLight
-        position={[-1.8, 6.8, 3.1]}
-        color="#fff6ea"
-        intensity={102}
-        angle={0.54}
-        penumbra={0.87}
-        castShadow
-        shadow-mapSize={[2048, 2048]}
-        shadow-radius={4}
-        shadow-normalBias={0.025}
-        shadow-bias={-0.00015}
-      />
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.022, 0]} receiveShadow>
-        <planeGeometry args={[160, 160]} />
-        <meshStandardMaterial color="#1c1e24" metalness={0.06} roughness={0.92} envMapIntensity={0.18} />
-      </mesh>
-    </>
-  );
 }
 
 type StageProps = ShowroomProps & {
@@ -168,8 +128,18 @@ export function VehicleStage({ onDriverChange, onPartClick, buttons }: StageProp
   }, [camera, gl, model, pickRay, screen]);
 
   useEffect(() => {
+    const previous = gl.localClippingEnabled;
+    gl.localClippingEnabled = true;
+    return () => { gl.localClippingEnabled = previous; };
+  }, [gl]);
+
+  useEffect(() => {
     reportDriver({
       setPartOpen: model.setPartOpen,
+      setWindowOpenness: model.setWindowOpenness,
+      getWindowOpenness: model.getWindowOpenness,
+      stopWindowMovement: model.stopWindowMovement,
+      setWipersRunning: model.setWipersRunning,
       resetView: () => {
         const controls = orbit.current;
         if (!controls) return;
@@ -192,8 +162,9 @@ export function VehicleStage({ onDriverChange, onPartClick, buttons }: StageProp
       orbit.current.dampingFactor = 1 - Math.exp(-6 * Math.min(delta, 0.25));
       orbit.current.update();
     }
-    if (model.advance(delta)) {
-      gl.shadowMap.needsUpdate = true;
+    const motion = model.advance(delta);
+    if (motion.shadowChanged) gl.shadowMap.needsUpdate = true;
+    if (motion.moved) {
       visibilityDirty.current = true;
     }
     camera.updateMatrixWorld();
@@ -238,7 +209,7 @@ export function VehicleStage({ onDriverChange, onPartClick, buttons }: StageProp
 
   return (
     <>
-      <StudioLights />
+      <StudioEnvironment />
       <primitive object={model.root} dispose={null} />
     </>
   );

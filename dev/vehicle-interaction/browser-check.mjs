@@ -105,7 +105,10 @@ try {
     + JSON.stringify(text) + ').click()',
   );
   const part = (id) => JSON.stringify('[data-part="' + id + '"]');
-  const switchPart = (id) => evaluate('document.querySelector(' + part(id) + ').click()');
+  const switchPart = (id) => evaluate('document.querySelector(' + part(id)
+    + (id.endsWith('Window') ? ').querySelector("[data-window-direction=lower]")' : ')') + '.click()');
+  const windowPoint = (direction) => evaluate('(()=>{const r=document.querySelector("[data-part=frontLeftWindow] [data-window-direction='
+    + direction + ']").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()');
   const settled = (id, open) => waitFor(() => evaluate(
     'document.querySelector(' + part(id) + ')?.dataset.open==="' + open
     + '" && document.querySelector(' + part(id) + ').dataset.moving==="false"',
@@ -144,11 +147,52 @@ try {
       await switchPart(id);
       await settled(id, true);
       assert.equal(await evaluate('document.querySelectorAll("[data-part][data-open=true]").length'), 1);
-      await switchPart(id);
+      if (id.endsWith('Window')) await choose('全部升起');
+      else await switchPart(id);
       await settled(id, false);
     }
   }
   console.log('PASS all ten parts independently opened and closed');
+
+  await choose('车窗');
+  const lowerButton = await windowPoint('lower');
+  const raiseButton = await windowPoint('raise');
+  await click(lowerButton.x, lowerButton.y);
+  await settled('frontLeftWindow', true);
+  await click(raiseButton.x, raiseButton.y);
+  await settled('frontLeftWindow', false);
+  assert.equal(await evaluate('Number(document.querySelector("[data-part=frontLeftWindow]").dataset.openness)'), 0);
+
+  await evaluate('document.querySelector("[data-wipers]").click()');
+  await waitFor(() => evaluate('document.querySelector("[data-wipers]").dataset.wipers==="running"'));
+  for (const [direction, point] of [['lower', lowerButton], ['raise', raiseButton]]) {
+    await mouse('mousePressed', point.x, point.y, { button: 'left', buttons: 1, clickCount: 1 });
+    await delay(980);
+    // Pointer capture also stops manual movement when the release occurs outside the control.
+    await mouse('mouseReleased', 100, 155, { button: 'left', buttons: 0, clickCount: 1 });
+    await waitFor(() => evaluate('document.querySelector("[data-part=frontLeftWindow]").dataset.moving==="false"'));
+    const partial = await evaluate('Number(document.querySelector("[data-part=frontLeftWindow]").dataset.openness)');
+    assert.ok(direction === 'lower' ? partial > 0 && partial < 0.5 : partial > 0.5 && partial < 1,
+      'Long press should move slowly and stop between endpoints in direction ' + direction);
+    await delay(450);
+    assert.equal(await evaluate('Number(document.querySelector("[data-part=frontLeftWindow]").dataset.openness)'), partial);
+    if (direction === 'lower') {
+      await click(lowerButton.x, lowerButton.y);
+      await settled('frontLeftWindow', true);
+    }
+  }
+  await screenshot('window-partial');
+  await evaluate('document.querySelector("[data-wipers]").click()');
+  await waitFor(() => evaluate('document.querySelector("[data-wipers]").dataset.wipers==="off"'));
+  await click(raiseButton.x, raiseButton.y);
+  await settled('frontLeftWindow', false);
+  await click(lowerButton.x, lowerButton.y);
+  await waitFor(() => evaluate('document.querySelector("[data-part=frontLeftWindow]").dataset.moving==="true"'));
+  await delay(300);
+  await click(raiseButton.x, raiseButton.y);
+  await settled('frontLeftWindow', false);
+  assert.equal(await evaluate('Number(document.querySelector("[data-part=frontLeftWindow]").dataset.openness)'), 0);
+  console.log('PASS both window directions tap to endpoint, hold to move slowly, release to stop, reverse mid-motion and independent wiper parking');
 
   await choose('车门');
   await switchPart('frontLeftDoor');
@@ -197,7 +241,8 @@ try {
     await click(marker[1], marker[2]);
     await settled(id, true);
     await evaluate('document.querySelector(' + selector + ').style.pointerEvents=""');
-    await switchPart(id);
+    if (id.endsWith('Window')) await choose('全部升起');
+    else await switchPart(id);
     await settled(id, false);
   }
   console.log('PASS direct ray picking on door, glass and frunk');

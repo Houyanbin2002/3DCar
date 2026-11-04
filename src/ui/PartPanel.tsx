@@ -1,7 +1,8 @@
 import { useState, useSyncExternalStore } from 'react';
 import { DOOR_IDS, WINDOW_IDS } from '../contracts/vehicle';
-import type { PartId, VehicleController } from '../contracts/vehicle';
+import type { PartId, VehicleController, WindowId } from '../contracts/vehicle';
 import { PART_LABELS, partVerb } from '../vehicle/partLabels';
+import { WindowButton } from './WindowButton';
 import './part-panel.css';
 
 const sections = [
@@ -43,11 +44,24 @@ export function PartPanel({ controller }: { controller: VehicleController }) {
       <div className="part-panel__grid">
         {ids.map((id) => {
           const part = state.parts[id];
+          if (section.id === 'windows') {
+            return (
+              <WindowButton
+                key={id}
+                id={id as WindowId}
+                part={part}
+                controller={controller}
+                ready={state.ready}
+                gesturesEnabled={Boolean(state.supportsWindowGestures)}
+              />
+            );
+          }
           const actionLabel = partVerb(id, !part.open) + PART_LABELS[id];
+          const status = part.moving ? partVerb(id, part.targetOpen) + '中' : '已' + partVerb(id, part.open);
           return (
             <button
-              className="part-panel__part"
               key={id}
+              className="part-panel__part"
               type="button"
               data-part={id}
               data-open={part.open}
@@ -58,18 +72,19 @@ export function PartPanel({ controller }: { controller: VehicleController }) {
               onClick={() => { void controller.togglePart(id); }}
             >
               <span>{PART_LABELS[id]}</span>
-              <span className="part-panel__part-state">
-                {part.moving ? partVerb(id, part.targetOpen) + '中' : '已' + partVerb(id, part.open)}
-              </span>
+              <span className="part-panel__part-state">{status}</span>
             </button>
           );
         })}
       </div>
+      {section.id === 'windows' && state.supportsWindowGestures && (
+        <p className="part-panel__hint">轻点自动到位 · 长按慢移 · 松开即停</p>
+      )}
       {section.id !== 'storage' && (
         <div className="part-panel__batch" role="group" aria-label="批量控制">
           <button
             type="button"
-            disabled={!state.ready || busy || ids.every((id) => state.parts[id].open)}
+            disabled={!state.ready || busy || ids.every((id) => (state.parts[id].openness ?? Number(state.parts[id].open)) === 1)}
             onClick={() => { void controller.execute([{ kind: 'group', group: section.id, open: true }]); }}
           >
             {section.open}
@@ -83,6 +98,22 @@ export function PartPanel({ controller }: { controller: VehicleController }) {
           </button>
         </div>
       )}
+      <div className="part-panel__wipers">
+        <div>
+          <span>雨刮</span>
+          <small>{state.wiperState === 'running' ? '自动循环' : state.wiperState === 'parking' ? '正在归位' : '已关闭'}</small>
+        </div>
+        <button
+          type="button"
+          data-wipers={state.wiperState ?? 'off'}
+          aria-pressed={state.wiperState === 'running'}
+          aria-label={state.wiperState === 'running' ? '关闭雨刮' : '开启雨刮'}
+          disabled={!state.ready || !state.supportsWipers || state.wiperState === 'parking'}
+          onClick={() => { void controller.setWipersRunning?.(state.wiperState !== 'running'); }}
+        >
+          {state.wiperState === 'running' ? '关闭' : state.wiperState === 'parking' ? '归位中' : '开启'}
+        </button>
+      </div>
       <div className="part-panel__footer">
         <span>模拟动力</span>
         <span data-running={state.engineRunning}>{state.engineRunning ? '运行中' : '已熄火'}</span>

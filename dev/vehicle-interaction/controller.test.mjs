@@ -6,6 +6,7 @@ import { createServer } from 'vite';
 let vite;
 let createVehicleController;
 let PART_IDS;
+let bindWipers;
 
 before(async () => {
   vite = await createServer({
@@ -14,6 +15,7 @@ before(async () => {
   });
   ({ createVehicleController } = await vite.ssrLoadModule('/src/vehicle/vehicleController.ts'));
   ({ PART_IDS } = await vite.ssrLoadModule('/src/contracts/vehicle.ts'));
+  ({ bindWipers } = await vite.ssrLoadModule('/src/scene/wipers.ts'));
 });
 
 after(async () => { await vite?.close(); });
@@ -66,7 +68,7 @@ test('batch waits for all group members before opening the next part', async () 
   await flush();
   assert.equal(calls.length, 4);
   assert.deepEqual(controller.getSnapshot().parts.frontLeftWindow, {
-    open: false, targetOpen: true, moving: true,
+    open: false, targetOpen: true, moving: true, openness: 0, targetOpenness: 1,
   });
   calls.slice(0, 3).forEach((call) => call.resolve());
   await flush();
@@ -162,4 +164,162 @@ test('failure rolls back the part and engine commands are idempotent', async () 
   const results = await controller.execute([run, run, stop]);
   assert.deepEqual(results.map(({ outcome }) => outcome), ['completed', 'already-at-target', 'completed']);
   assert.equal(controller.getSnapshot().engineRunning, false);
+});
+
+test('window gestures stop at the displayed position and can then lower fully', async () => {
+  const controller = createVehicleController();
+  let position = 0;
+  let active;
+  const targets = [];
+  controller.attachScene({
+    resetView() {},
+    async setPartOpen() {},
+    setWindowOpenness(id, target) {
+      targets.push(target);
+      return new Promise((resolve) => { active = { resolve }; });
+    },
+    getWindowOpenness() { return position; },
+    stopWindowMovement() { active?.resolve(); active = undefined; },
+  });
+  assert.equal(controller.getSnapshot().supportsWindowGestures, true);
+  const lower = controller.execute([partAction('frontLeftWindow')]);
+  await flush();
+  position = 1;
+  active.resolve();
+  await lower;
+
+  const raise = controller.beginWindowMove('frontLeftWindow', 'raise');
+  await flush();
+  assert.equal(targets.at(-1), 0);
+  position = 0.63;
+  controller.stopWindow('frontLeftWindow');
+  assert.equal(await raise, 'cancelled');
+  assert.equal(controller.getSnapshot().parts.frontLeftWindow.openness, 0.63);
+  assert.equal(controller.getSnapshot().parts.frontLeftWindow.moving, false);
+
+  const lowerAgain = controller.execute([partAction('frontLeftWindow')]);
+  await flush();
+  assert.equal(targets.at(-1), 1);
+  position = 1;
+  active.resolve();
+  assert.equal((await lowerAgain)[0].outcome, 'completed');
+});
+
+test('manual lowering preserves arbitrary position and a subsequent tap raises fully', async () => {
+  const controller = createVehicleController();
+  let position = 0;
+  let active;
+  const calls = [];
+  controller.attachScene({
+    resetView() {},
+    async setPartOpen() {},
+    setWindowOpenness(id, target, options) {
+      calls.push({ target, manual: options.manual });
+      return new Promise((resolve) => { active = { resolve }; });
+    },
+    getWindowOpenness() { return position; },
+    stopWindowMovement() { active?.resolve(); active = undefined; },
+  });
+  const lower = controller.beginWindowMove('frontLeftWindow', 'lower');
+  await flush();
+  assert.deepEqual(calls, [{ target: 1, manual: true }]);
+  position = 0.24;
+  controller.stopWindow('frontLeftWindow');
+  assert.equal(await lower, 'cancelled');
+  assert.equal(controller.getSnapshot().parts.frontLeftWindow.openness, 0.24);
+  assert.equal(controller.getSnapshot().parts.frontLeftWindow.moving, false);
+
+  const raise = controller.execute([partAction('frontLeftWindow', false)]);
+  await flush();
+  assert.deepEqual(calls.at(-1), { target: 0, manual: false });
+  position = 0;
+  active.resolve();
+  assert.equal((await raise)[0].outcome, 'completed');
+  assert.equal(controller.getSnapshot().parts.frontLeftWindow.openness, 0);
+});
+
+test('releasing a queued raise prevents movement after the pointer is released', async () => {
+  const controller = createVehicleController();
+  let position = 0;
+  let resolve;
+  const targets = [];
+  controller.attachScene({
+    resetView() {},
+    async setPartOpen() {},
+    setWindowOpenness(id, target) {
+      targets.push(target);
+      return new Promise((done) => { resolve = done; });
+    },
+    getWindowOpenness() { return position; },
+    stopWindowMovement() { resolve?.(); },
+  });
+  const lower = controller.execute([partAction('frontLeftWindow')]);
+  await flush();
+  position = 0.27;
+  const raise = controller.beginWindowMove('frontLeftWindow', 'raise');
+  controller.stopWindow('frontLeftWindow');
+  assert.equal(await raise, 'cancelled');
+  await lower;
+  assert.deepEqual(targets, [1]);
+  assert.equal(controller.getSnapshot().parts.frontLeftWindow.openness, 0.27);
+});
+
+test('invalid positions fail and legacy drivers retain full open and close', async () => {
+  const controller = createVehicleController();
+  const { driver, calls } = createFakeScene();
+  controller.attachScene(driver);
+  for (const openness of [-0.1, 1.1, NaN, Infinity]) {
+    const result = await controller.execute([{ ...partAction('frontLeftWindow'), openness }]);
+    assert.equal(result[0].outcome, 'failed');
+  }
+  const partial = await controller.execute([{ ...partAction('frontLeftWindow'), openness: 0.4 }]);
+  assert.equal(partial[0].outcome, 'failed');
+  assert.equal(calls.length, 0);
+  assert.equal(controller.getSnapshot().supportsWindowGestures, false);
+  const full = controller.execute([partAction('frontLeftWindow')]);
+  await flush();
+  calls[0].resolve();
+  assert.equal((await full)[0].outcome, 'completed');
+});
+
+test('wiper control reports parking and completes independently from the doors', async () => {
+  const controller = createVehicleController();
+  let park;
+  controller.attachScene({
+    resetView() {},
+    async setPartOpen() {},
+    setWipersRunning(running) {
+      return running ? Promise.resolve() : new Promise((resolve) => { park = resolve; });
+    },
+  });
+  assert.equal(await controller.setWipersRunning(true), 'completed');
+  assert.equal(controller.getSnapshot().wiperState, 'running');
+  const stop = controller.setWipersRunning(false);
+  await flush();
+  assert.equal(controller.getSnapshot().wiperState, 'parking');
+  assert.equal(await controller.setWipersRunning(true), 'cancelled');
+  assert.equal((await controller.togglePart('frontLeftDoor')).outcome, 'completed');
+  park();
+  assert.equal(await stop, 'completed');
+  assert.equal(controller.getSnapshot().wiperState, 'off');
+});
+
+test('wiper arms sweep around their own pivots and stop at their original pose', async () => {
+  const { Group } = await import('three');
+  const root = new Group();
+  const right = new Group(); right.name = 'dvorright';
+  const left = new Group(); left.name = 'dvorleft';
+  root.add(right, left);
+  const wipers = bindWipers(root);
+  await wipers.setRunning(true);
+  assert.equal(wipers.advance(0.3875), true);
+  assert.ok(right.rotation.y < -0.5);
+  assert.ok(left.rotation.y < -0.5);
+  const stop = wipers.setRunning(false);
+  wipers.advance(1.1625);
+  await stop;
+  assert.equal(right.rotation.y, 0);
+  assert.equal(left.rotation.y, 0);
+  assert.equal(wipers.advance(0.2), false);
+  wipers.dispose();
 });
