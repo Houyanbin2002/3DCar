@@ -9,6 +9,11 @@ import { createBrowserSpeechInput } from '../speechIO';
 import type { NativeRecognition, SpeechInput, SpeechInputEvents, SpeechOutput } from '../speechIO';
 import { createSimulatedVehicle } from '../../../dev/voice/mockVehicle';
 import type { VehicleAction } from '../../contracts/vehicle';
+import type { ControlClient } from '../controlClient';
+import { createControlClient } from '../controlClient';
+import { createVehicleToolRegistry } from '../toolRegistry';
+import { routeCommand } from '../parseCommand';
+import type { ControlResponse, ToolCall } from '../../../shared/control';
 
 class FakeClock implements VoiceClock {
   now = 0;
@@ -53,7 +58,7 @@ function deferred<T>() {
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function setup(overrides: { intent?: IntentClient; output?: SpeechOutput } = {}) {
+function setup(overrides: { intent?: IntentClient; output?: SpeechOutput; control?: ControlClient } = {}) {
   const clock = new FakeClock();
   const input = new FakeInput();
   const vehicle = createSimulatedVehicle();
@@ -64,9 +69,22 @@ function setup(overrides: { intent?: IntentClient; output?: SpeechOutput } = {})
   vehicle.execute = (actions, options) => { calls.push([...actions]); return originalExecute(actions, options); };
   const intent: IntentClient = overrides.intent ?? (async (text) => { intents.push(text); return { intent: 'ventilate' }; });
   const output: SpeechOutput = overrides.output ?? { speak: async (text) => { spoken.push(text); } };
-  const control = new VoiceControl({ controller: vehicle, clock, input, output, intentClient: intent });
+  const controlClient: ControlClient = async (request, signal) => {
+    const result = await intent(request.text, signal);
+    const parsed = parseCommand(request.text);
+    if (parsed.kind === 'clarify') return { toolCalls: [], reply: parsed.message };
+    if (result.intent === 'unsupported') return { toolCalls: [], reply: '没能理解这句话，可以说打开左前窗。' };
+    const snapshot = vehicle.getSnapshot();
+    const partId = (['frontLeftWindow', 'frontRightWindow', 'rearLeftWindow', 'rearRightWindow'] as const)
+      .find((id) => !snapshot.parts[id].open && !snapshot.parts[id].moving);
+    return partId
+      ? { toolCalls: [{ id: 'test-call', name: 'set_vehicle_part', arguments: { partId, open: true } }], reply: '' }
+      : { toolCalls: [], reply: '车窗已经降下了。' };
+  };
+  const tools = createVehicleToolRegistry(vehicle);
+  const control = new VoiceControl({ controller: vehicle, clock, input, output, controlClient: overrides.control ?? controlClient, tools });
   control.start();
-  return { control, clock, input, vehicle, calls, intents, spoken };
+  return { control, clock, input, vehicle, calls, intents, spoken, tools };
 }
 
 test('明确目标、同义表达与全车动作映射到公共契约', () => {
@@ -188,7 +206,7 @@ test('一轮多段结果聚合，正在说话时等待后续分句', async () =>
   s.control.stop();
 });
 
-test('部分有效与模糊指令均保留反馈并跳过模型', async () => {
+test('部分有效先执行规则动作，模糊片段交给模型追问', async () => {
   const s = setup();
   s.input.say('小满小满打开左前门再打开');
   s.clock.advance(1_000);
@@ -199,7 +217,7 @@ test('部分有效与模糊指令均保留反馈并跳过模型', async () => {
   s.clock.advance(1_000);
   await flush();
   assert.match(s.control.getSnapshot().message, /哪扇/u);
-  assert.equal(s.intents.length, 0);
+  assert.equal(s.intents.length, 2);
   s.control.stop();
 });
 
@@ -452,4 +470,119 @@ test('模型客户端处理调用前取消、调用中取消与超时', async ()
   const promise = client('闷热了', request.signal);
   request.abort();
   await assert.rejects(promise, (error) => error instanceof IntentClientError && error.code === 'aborted');
+});
+
+test('规则置信级别由完整匹配判定，低置信度与未匹配送模型', () => {
+  const route = routeCommand('打开左前门，再把右边前面的玻璃放下来，然后熄火');
+  assert.deepEqual(route.steps.map((step) => [step.source, step.confidence]), [
+    ['rule', 'high'], ['model', 'unmatched'], ['rule', 'high'],
+  ]);
+  assert.equal(routeCommand('打开车窗').steps[0].confidence, 'low');
+  assert.equal(routeCommand('不要打开左前门').cancelled, true);
+});
+
+test('运行时注册温控工具后，下次请求自动包含定义并能执行', async () => {
+  let temperature = 20;
+  const s = setup({ control: async (request) => {
+    assert.ok(request.tools.some((tool) => tool.function.name === 'set_cabin_temperature'));
+    assert.deepEqual(request.context.set_cabin_temperature, { celsius: 20 });
+    return { toolCalls: [{ id: 'temperature-call', name: 'set_cabin_temperature', arguments: { celsius: 24 } }], reply: '' };
+  } });
+  s.tools.register({
+    definition: { type: 'function', function: {
+      name: 'set_cabin_temperature', description: '设置车内空调温度。',
+      parameters: { type: 'object', additionalProperties: false, required: ['celsius'], properties: { celsius: { type: 'number', minimum: 16, maximum: 30 } } },
+    } },
+    confirmation: 'always', context: () => ({ celsius: temperature }),
+    prepare: (args) => ({ label: `将空调调到${args.celsius}度`, execute: async () => { temperature = args.celsius as number; return '温度设置完成。'; } }),
+  });
+  s.input.say('小满小满，空调调到二十四度');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(temperature, 20);
+  assert.match(s.spoken[0], /24/u);
+  s.control.confirm(true);
+  await flush();
+  assert.equal(temperature, 24);
+  assert.match(s.control.getSnapshot().message, /温度设置完成/u);
+  s.control.stop();
+});
+
+test('模型指定的任意已注册部件按顺序执行，无通风标签映射', async () => {
+  const s = setup({ control: async (): Promise<ControlResponse> => ({ toolCalls: [
+    { id: 'first', name: 'set_vehicle_part', arguments: { partId: 'frunk', open: true } },
+    { id: 'second', name: 'set_engine_state', arguments: { running: true } },
+  ], reply: '' }) });
+  s.input.say('小满小满，请把前面的储物空间掀开并让车准备好');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(s.calls.length, 0);
+  s.control.confirm(true);
+  await flush();
+  assert.deepEqual(s.calls.flat(), [{ kind: 'part', partId: 'frunk', open: true }, { kind: 'engine', running: true }]);
+  s.control.stop();
+});
+
+test('未知工具或非法参数拒绝整批执行', () => {
+  const registry = createVehicleToolRegistry(createSimulatedVehicle());
+  const invalidCalls: ToolCall[] = [
+    { id: 'x', name: 'unregistered', arguments: {} },
+    { id: 'x', name: 'set_vehicle_part', arguments: { partId: 'frontLeftWindow', open: 'yes' } },
+    { id: 'x', name: 'set_engine_state', arguments: { running: true, arbitrary: 'extra' } },
+  ];
+  for (const call of invalidCalls) {
+    assert.throws(() => registry.prepare({ toolCalls: [call], reply: '' }));
+  }
+});
+
+test('工具卸载后旧批次失效，新注册实例不能恢复旧批次', async () => {
+  const registry = createVehicleToolRegistry(createSimulatedVehicle());
+  let executed = false;
+  const tool = {
+    definition: { type: 'function' as const, function: {
+      name: 'set_light', description: '控制灯光。',
+      parameters: { type: 'object' as const, additionalProperties: false as const, required: ['on'], properties: { on: { type: 'boolean' as const } } },
+    } },
+    confirmation: 'always' as const,
+    prepare: () => ({ label: '打开灯光', execute: async () => { executed = true; return '灯光已打开。'; } }),
+  };
+  const unregister = registry.register(tool);
+  const batch = registry.prepare({ toolCalls: [{ id: 'light', name: 'set_light', arguments: { on: true } }], reply: '' });
+  unregister();
+  registry.register(tool);
+  await assert.rejects(registry.execute(batch, new AbortController().signal, () => {}));
+  assert.equal(executed, false);
+});
+
+test('控制客户端发送运行时定义并拒绝未提供工具的响应', async () => {
+  const registry = createVehicleToolRegistry(createSimulatedVehicle());
+  const request = { text: '想透透气', tools: registry.definitions(), context: registry.context() };
+  const client = createControlClient({ url: 'https://example.com/api/intent', fetch: async (_url, init) => {
+    assert.deepEqual(JSON.parse(String(init?.body)).tools, request.tools);
+    return Response.json({ toolCalls: [{ id: 'open-window', name: 'set_vehicle_part', arguments: { partId: 'frontLeftWindow', open: true } }], reply: '' });
+  } });
+  const result = await client(request, new AbortController().signal);
+  assert.equal(result.toolCalls[0].name, 'set_vehicle_part');
+  const invalid = createControlClient({ url: 'https://example.com/api/intent', fetch: async () => Response.json({ toolCalls: [{ id: 'x', name: 'shell', arguments: { command: 'anything' } }], reply: '' }) });
+  await assert.rejects(invalid(request, new AbortController().signal), { code: 'invalid-response' });
+});
+
+test('只读工具按登记策略直接执行，车辆动作仍由确认策略控制', async () => {
+  const s = setup({ control: async () => ({ toolCalls: [{ id: 'read-state', name: 'read_status', arguments: {} }], reply: '' }) });
+  let readCount = 0;
+  s.tools.register({
+    definition: { type: 'function', function: {
+      name: 'read_status', description: '读取当前展厅状态。',
+      parameters: { type: 'object', additionalProperties: false, required: [], properties: {} },
+    } },
+    confirmation: 'never',
+    prepare: () => ({ label: '读取状态', execute: async () => { readCount++; return '状态读取完成。'; } }),
+  });
+  s.input.say('小满小满现在的状态怎么样');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(readCount, 1);
+  assert.equal(s.control.getSnapshot().phase, 'waiting');
+  assert.equal(s.spoken.length, 0);
+  s.control.stop();
 });

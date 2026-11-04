@@ -38,6 +38,38 @@ export type ParsedCommand =
   | { kind: 'indirect'; text: string }
   | { kind: 'cancelled' };
 
+export type RoutedStep =
+  | { source: 'rule'; confidence: 'high'; actions: VehicleAction[] }
+  | { source: 'model'; confidence: 'low' | 'unmatched'; text: string };
+
+export function routeCommand(text: string): { cancelled: boolean; steps: RoutedStep[] } {
+  if (cancellation.test(normalizeSpeech(text))) return { cancelled: true, steps: [] };
+  const chunks = text.replace(/[，,。；;、！？!?]/gu, '|')
+    .split(/(然后|接着|再|并且|以及|还有|和|并|\|+)/u);
+  const steps: RoutedStep[] = [];
+  let inheritedOpen: boolean | undefined;
+  for (let index = 0; index < chunks.length; index += 2) {
+    const original = chunks[index].trim();
+    const clause = cleanClause(original);
+    if (!clause) continue;
+    const shared = /^(和|以及|还有)$/u.test(chunks[index - 1] ?? '') ? inheritedOpen : undefined;
+    const actions = parseClause(clause, shared);
+    if (actions) {
+      const previous = steps.at(-1);
+      if (previous?.source === 'rule') previous.actions.push(...actions);
+      else steps.push({ source: 'rule', confidence: 'high', actions });
+      const last = actions.at(-1)!;
+      inheritedOpen = last.kind === 'engine' ? undefined : last.open;
+    } else {
+      inheritedOpen = undefined;
+      const previous = steps.at(-1);
+      if (previous?.source === 'model') previous.text += `，${original}`;
+      else steps.push({ source: 'model', confidence: /门|窗|备箱|引擎|打开|关闭/u.test(clause) ? 'low' : 'unmatched', text: original });
+    }
+  }
+  return { cancelled: false, steps };
+}
+
 export function normalizeSpeech(text: string): string {
   return text.replace(/[\s\p{P}]/gu, '');
 }

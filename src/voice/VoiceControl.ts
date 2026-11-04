@@ -1,8 +1,11 @@
-import { WINDOW_IDS } from '../contracts/vehicle';
-import type { PartId, VehicleAction, VehicleController } from '../contracts/vehicle';
-import { createIntentClient, IntentClientError } from './intentClient';
-import type { IntentClient } from './intentClient';
-import { describeAction, describeResult, extractWakeCommand, normalizeSpeech, parseCommand, PART_LABELS } from './parseCommand';
+import type { VehicleAction, VehicleController } from '../contracts/vehicle';
+import { IntentClientError } from './intentClient';
+import { createControlClient } from './controlClient';
+import type { ControlClient } from './controlClient';
+import { describeAction, describeResult, extractWakeCommand, normalizeSpeech, routeCommand } from './parseCommand';
+import type { RoutedStep } from './parseCommand';
+import { createVehicleToolRegistry } from './toolRegistry';
+import type { PreparedToolBatch, ToolRegistry } from './toolRegistry';
 import { createBrowserSpeechInput, createBrowserSpeechOutput } from './speechIO';
 import type { SpeechInput, SpeechOutput, TranscriptUpdate } from './speechIO';
 
@@ -25,7 +28,8 @@ export interface VoiceControlOptions {
   controller: VehicleController;
   input?: SpeechInput;
   output?: SpeechOutput;
-  intentClient?: IntentClient;
+  controlClient?: ControlClient;
+  tools?: ToolRegistry;
   clock?: VoiceClock;
   timing?: Partial<typeof defaultTiming>;
 }
@@ -52,7 +56,8 @@ export class VoiceControl {
   private readonly controller: VehicleController;
   private readonly input: SpeechInput;
   private readonly output: SpeechOutput;
-  private readonly intentClient: IntentClient;
+  private readonly controlClient: ControlClient;
+  private readonly tools: ToolRegistry;
   private readonly clock: VoiceClock;
   private readonly timing: typeof defaultTiming;
   private readonly listeners = new Set<() => void>();
@@ -63,7 +68,8 @@ export class VoiceControl {
   private speechActive = false;
   private hasInterim = false;
   private commandText = '';
-  private pendingWindow: PartId | null = null;
+  private pendingTools: PreparedToolBatch | null = null;
+  private steps: RoutedStep[] = [];
   private abort = new AbortController();
   private snapshot: VoiceSnapshot;
 
@@ -71,7 +77,8 @@ export class VoiceControl {
     this.controller = options.controller;
     this.input = options.input ?? createBrowserSpeechInput();
     this.output = options.output ?? createBrowserSpeechOutput();
-    this.intentClient = options.intentClient ?? createIntentClient();
+    this.controlClient = options.controlClient ?? createControlClient();
+    this.tools = options.tools ?? createVehicleToolRegistry(options.controller);
     this.clock = options.clock ?? defaultClock;
     this.timing = { ...defaultTiming, ...options.timing };
     this.snapshot = {
@@ -105,12 +112,12 @@ export class VoiceControl {
   };
 
   readonly confirm = (accepted: boolean): void => {
-    if (this.snapshot.phase !== 'confirming' || !this.pendingWindow) return;
-    const partId = this.pendingWindow;
-    this.pendingWindow = null;
+    if (this.snapshot.phase !== 'confirming' || !this.pendingTools) return;
+    const pending = this.pendingTools;
+    this.pendingTools = null;
     this.cancelTimer('confirm');
-    if (!accepted) { this.finish('已取消开窗建议。'); return; }
-    void this.execute([{ kind: 'part', partId, open: true }], []);
+    if (!accepted) { this.finish('已取消本轮建议。'); return; }
+    void this.executeConfirmed(pending);
   };
 
   private update(change: Partial<VoiceSnapshot>): void {
@@ -132,7 +139,8 @@ export class VoiceControl {
     this.turn += 1;
     this.abort.abort();
     this.abort = new AbortController();
-    this.pendingWindow = null;
+    this.pendingTools = null;
+    this.steps = [];
     this.commandText = '';
     this.hasInterim = false;
     for (const name of ['wake', 'settle', 'confirm', 'turn'] as const) this.cancelTimer(name);
@@ -244,69 +252,96 @@ export class VoiceControl {
     const text = this.commandText;
     this.cancelTimer('turn');
     this.cancelTimer('wake');
-    const parsed = parseCommand(text);
-    if (parsed.kind === 'commands') await this.execute(parsed.actions, parsed.messages);
-    else if (parsed.kind === 'indirect') await this.suggest(parsed.text);
-    else this.finish(parsed.kind === 'cancelled' ? '本轮已取消。' : parsed.message);
+    const route = routeCommand(text);
+    if (route.cancelled) { this.finish('本轮已取消。'); return; }
+    this.steps = route.steps;
+    await this.advance();
   }
 
-  private async execute(actions: readonly VehicleAction[], messages: readonly string[]): Promise<void> {
-    if (!this.controller.getSnapshot().ready) { this.finish('车辆仍在加载，请稍后重试。'); return; }
+  private addFeedback(message: string): void {
+    this.update({ feedback: [...this.snapshot.feedback, message], message });
+  }
+
+  private async advance(): Promise<void> {
     const turn = this.turn;
-    const feedback: string[] = [];
+    while (this.current(turn) && this.steps.length) {
+      const step = this.steps.shift()!;
+      if (step.source === 'rule') await this.executeActions(step.actions);
+      else if (await this.planTools(step.text)) return;
+    }
+    if (this.current(turn)) this.finish(this.snapshot.feedback.join(' ') || '没听清，可以说打开左前门。');
+  }
+
+  private async executeActions(actions: readonly VehicleAction[]): Promise<void> {
+    if (!this.controller.getSnapshot().ready) { this.addFeedback('车辆仍在加载，请稍后重试。'); return; }
+    const turn = this.turn;
+    const previousCount = this.snapshot.feedback.length;
     this.update({ phase: 'executing', message: `正在${describeAction(actions[0])}…` });
     try {
       const results = await this.controller.execute(actions, {
         signal: this.abort.signal,
         onResult: (result) => {
           if (!this.current(turn)) return;
-          feedback.push(describeResult(result));
-          this.update({ feedback: [...feedback], message: feedback.at(-1)! });
+          this.addFeedback(describeResult(result));
         },
       });
       if (!this.current(turn)) return;
-      if (!feedback.length) feedback.push(...results.map(describeResult));
-      const all = [...feedback, ...messages];
-      this.finish(all.join(' ') || '本轮执行已结束。', all);
+      if (this.snapshot.feedback.length === previousCount) {
+        for (const result of results) this.addFeedback(describeResult(result));
+      }
     } catch {
-      if (this.current(turn)) this.finish('本次动作未能完成，请稍后重试。', [...feedback, ...messages]);
+      if (this.current(turn)) this.addFeedback('本次动作未能完成，请稍后重试。');
     }
   }
 
-  private async suggest(text: string): Promise<void> {
+  private async executeToolBatch(batch: PreparedToolBatch): Promise<void> {
+    const turn = this.turn;
+    this.update({ phase: 'executing', message: `正在${batch.tools[0].prepared.label}…` });
+    try {
+      await this.tools.execute(batch, this.abort.signal, (message) => {
+        if (this.current(turn)) this.addFeedback(message);
+      });
+    } catch {
+      if (this.current(turn)) this.addFeedback('本次工具动作未能完成，请重新唤醒后重试。');
+    }
+  }
+
+  private async executeConfirmed(batch: PreparedToolBatch): Promise<void> {
+    const turn = this.turn;
+    await this.executeToolBatch(batch);
+    if (this.current(turn)) await this.advance();
+  }
+
+  private async planTools(text: string): Promise<boolean> {
     const turn = this.turn;
     this.update({ phase: 'thinking', message: '正在理解你的意思…' });
     try {
-      const response = await this.intentClient(text, this.abort.signal);
-      if (!this.current(turn)) return;
-      if (response.intent !== 'ventilate') { this.finish('没能理解这句话，可以直接说“打开左前窗”。'); return; }
-      const vehicle = this.controller.getSnapshot();
-      if (!vehicle.ready) { this.finish('车辆仍在加载，请稍后重试。'); return; }
-      const partId = WINDOW_IDS.find((id) => {
-        const part = vehicle.parts[id];
-        return !part.open && !part.targetOpen && !part.moving;
-      });
-      if (!partId) {
-        this.finish(WINDOW_IDS.some((id) => vehicle.parts[id].moving)
-          ? '车窗正在动作，请稍后再试。' : '车窗已经降下了。');
-        return;
+      const response = await this.controlClient({ text, tools: this.tools.definitions(), context: this.tools.context() }, this.abort.signal);
+      if (!this.current(turn)) return false;
+      const batch = this.tools.prepare(response);
+      if (!batch.tools.length) {
+        this.addFeedback(`未执行车辆动作。${response.reply}`);
+        return false;
       }
-      this.pendingWindow = partId;
-      const question = `要我帮你降下${PART_LABELS[partId]}吗？`;
+      if (!batch.requiresConfirmation) { await this.executeToolBatch(batch); return false; }
+      this.pendingTools = batch;
+      const question = `要我帮你${batch.tools.map(({ prepared }) => prepared.label).join('、')}吗？`;
       this.pauseInput();
       this.update({ phase: 'speaking', message: question });
       try { await this.output.speak(question, this.abort.signal); } catch { /* The visible question also supports confirmation. */ }
-      if (!this.current(turn)) return;
+      if (!this.current(turn)) return false;
       this.update({ phase: 'confirming', message: question });
       this.startInput();
       if (this.current(turn)) {
-        this.schedule('confirm', this.timing.confirmMs, () => this.finish('确认超时，已取消开窗建议。'));
+        this.schedule('confirm', this.timing.confirmMs, () => this.finish('确认超时，已取消本轮建议。'));
       }
+      return true;
     } catch (error) {
-      if (!this.current(turn)) return;
+      if (!this.current(turn)) return false;
       const reason = error instanceof IntentClientError && error.code === 'rate-limited'
         ? '智能建议使用较频繁，请稍后再试。' : '智能建议暂时不可用。';
-      this.finish(`${reason}可以直接说“打开左前窗”。`);
+      this.addFeedback(`${reason}可以直接说“打开左前窗”。`);
+      return false;
     }
   }
 

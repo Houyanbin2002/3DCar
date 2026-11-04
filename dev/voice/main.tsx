@@ -3,7 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { VoicePanel } from '../../src/ui/VoicePanel';
 import { PART_LABELS } from '../../src/voice/parseCommand';
 import { createBrowserSpeechInput, createBrowserSpeechOutput } from '../../src/voice/speechIO';
-import type { IntentClient } from '../../src/voice/intentClient';
+import type { ControlClient } from '../../src/voice/controlClient';
+import { WINDOW_IDS } from '../../src/contracts/vehicle';
+import type { PartSnapshot } from '../../src/contracts/vehicle';
 import type { PartId } from '../../src/contracts/vehicle';
 import { createSimulatedVehicle, SimulatedInput } from './mockVehicle';
 import './dev.css';
@@ -11,7 +13,14 @@ import './dev.css';
 const vehicle = createSimulatedVehicle();
 const simulatedInput = new SimulatedInput();
 const simulatedOutput = { speak: async () => {} };
-const simulatedIntent: IntentClient = async (text) => ({ intent: /闷|热|透气/u.test(text) ? 'ventilate' : 'unsupported' });
+const simulatedControl: ControlClient = async ({ text, context }) => {
+  if (!/闷|热|透气/u.test(text)) return { toolCalls: [], reply: '请补充动作和具体部件，例如打开左前窗。' };
+  const parts = context.set_vehicle_part as Record<string, PartSnapshot>;
+  const partId = WINDOW_IDS.find((id) => !parts[id].open && !parts[id].moving);
+  return partId
+    ? { toolCalls: [{ id: 'simulated-call', name: 'set_vehicle_part', arguments: { partId, open: true } }], reply: '' }
+    : { toolCalls: [], reply: '车窗已经降下了。' };
+};
 
 function Demo() {
   const [live, setLive] = useState(false);
@@ -49,7 +58,7 @@ function Demo() {
           <li><span>引擎</span><strong>{snapshot.engineRunning ? '运行中' : '已熄火'}</strong></li>
         </ul>
       </section>
-      <VoicePanel controller={vehicle} input={input} output={output} intentClient={realModel ? undefined : simulatedIntent} />
+      <VoicePanel controller={vehicle} input={input} output={output} controlClient={realModel ? undefined : simulatedControl} />
     </main>
   );
 }

@@ -11,12 +11,14 @@ export class IntentClientError extends Error {
   }
 }
 
-export function createIntentClient(options: {
+export interface GatewayOptions {
   url?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
-} = {}): IntentClient {
-  return async (text, signal) => {
+}
+
+export function createGatewayTransport(options: GatewayOptions = {}) {
+  return async (payload: { text: string }, signal: AbortSignal): Promise<unknown> => {
     if (signal.aborted) throw new IntentClientError('aborted');
     const endpoint = options.url ?? import.meta.env?.VITE_INTENT_API_URL;
     if (!endpoint) throw new IntentClientError('unconfigured');
@@ -25,7 +27,7 @@ export function createIntentClient(options: {
     catch { throw new IntentClientError('unconfigured'); }
     const localHttp = url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname);
     if (url.protocol !== 'https:' && !localHttp) throw new IntentClientError('unconfigured');
-    if (!text.trim() || text.length > 500) throw new IntentClientError('invalid-response');
+    if (!payload.text.trim() || payload.text.length > 500) throw new IntentClientError('invalid-response');
 
     const request = new AbortController();
     const abort = () => request.abort();
@@ -33,7 +35,7 @@ export function createIntentClient(options: {
     let timedOut = false;
     const timeout = setTimeout(() => { timedOut = true; request.abort(); }, options.timeoutMs ?? 8_000);
     try {
-      const body: IntentRequest = { text: text.trim() };
+      const body = { ...payload, text: payload.text.trim() };
       const response = await (options.fetch ?? fetch)(url.href, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -46,12 +48,7 @@ export function createIntentClient(options: {
       let result: unknown;
       try { result = await response.json(); }
       catch { throw new IntentClientError('invalid-response'); }
-      if (!result || typeof result !== 'object' || Array.isArray(result)
-        || Object.keys(result).length !== 1 || !('intent' in result)
-        || !INTENT_VALUES.includes(result.intent as IntentResponse['intent'])) {
-        throw new IntentClientError('invalid-response');
-      }
-      return result as IntentResponse;
+      return result;
     } catch (error) {
       if (signal.aborted) throw new IntentClientError('aborted');
       if (timedOut) throw new IntentClientError('timeout');
@@ -61,5 +58,19 @@ export function createIntentClient(options: {
       clearTimeout(timeout);
       signal.removeEventListener('abort', abort);
     }
+  };
+}
+
+export function createIntentClient(options: GatewayOptions = {}): IntentClient {
+  const send = createGatewayTransport(options);
+  return async (text, signal) => {
+    const body: IntentRequest = { text };
+    const result = await send(body, signal);
+    if (!result || typeof result !== 'object' || Array.isArray(result)
+      || Object.keys(result).length !== 1 || !('intent' in result)
+      || !INTENT_VALUES.includes(result.intent as IntentResponse['intent'])) {
+      throw new IntentClientError('invalid-response');
+    }
+    return result as IntentResponse;
   };
 }

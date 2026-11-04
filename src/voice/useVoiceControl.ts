@@ -3,10 +3,10 @@ import { VoiceControl } from './VoiceControl';
 import type { VoiceControlOptions } from './VoiceControl';
 
 export function useVoiceControl(options: VoiceControlOptions) {
-  const { controller, input, output, intentClient, clock, timing } = options;
+  const { controller, input, output, controlClient, tools, clock, timing } = options;
   const control = useMemo(
-    () => new VoiceControl({ controller, input, output, intentClient, clock, timing }),
-    [controller, input, output, intentClient, clock, timing],
+    () => new VoiceControl({ controller, input, output, controlClient, tools, clock, timing }),
+    [controller, input, output, controlClient, tools, clock, timing],
   );
   const snapshot = useSyncExternalStore(control.subscribe, control.getSnapshot, control.getSnapshot);
   // stop() is reversible so StrictMode's setup/cleanup cycle can safely reuse the control.
