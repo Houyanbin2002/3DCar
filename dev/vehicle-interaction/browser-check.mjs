@@ -136,7 +136,13 @@ try {
   await waitFor(async () => (await markers()).length >= 4);
   assert.equal(await evaluate('document.querySelectorAll(".vehicle-demo__controls [data-section]").length'), 3);
   assert.equal(await evaluate('document.querySelectorAll(".vehicle-demo__controls [data-part]").length'), 10);
-  assert.equal(await evaluate('document.querySelector(".vehicle-demo__controls").contains(document.querySelector(".voice-panel"))'), true);
+  if (process.env.SHOWCASE === '1') {
+    assert.equal(await evaluate('document.querySelector(".vehicle-demo__controls").contains(document.querySelector(".demo-video-panel"))'), true);
+    assert.equal(await evaluate('document.querySelector(".voice-panel__toggle") === null'), true);
+    assert.match(await evaluate('document.querySelector(".demo-video-panel").innerText'), /演示视频/u);
+  } else {
+    assert.equal(await evaluate('document.querySelector(".vehicle-demo__controls").contains(document.querySelector(".voice-panel"))'), true);
+  }
   assert.equal(await evaluate('document.querySelector(".vehicle-demo__controls").innerText.includes("已升起")'), false);
   assert.equal(await evaluate('document.querySelectorAll("[data-section]").length === 3 && document.querySelector(".vehicle-demo__controls").scrollHeight <= document.querySelector(".vehicle-demo__controls").clientHeight + 1'), true);
   const initial = await markers();

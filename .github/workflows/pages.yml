@@ -1,0 +1,67 @@
+name: Build and deploy GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PAGES_BASE: /${{ github.event.repository.name }}/
+      VITE_DEMO_MODE: showcase
+      VITE_DEMO_VIDEO_URL: ${{ vars.VITE_DEMO_VIDEO_URL }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+      - run: npm ci
+      - run: npm --prefix server ci
+      - name: Check vehicle controller
+        run: node --test dev/vehicle-interaction/controller.test.mjs
+      - name: Check voice and intent handling
+        run: node src/voice/tests/run.mjs
+      - name: Check API contracts
+        run: npm --prefix server test
+      - name: Build static showroom
+        run: npm run build
+      - name: Configure Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+      - name: Upload static site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy showroom
+        id: deployment
+        uses: actions/deploy-pages@v4

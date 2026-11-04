@@ -4,6 +4,7 @@ import { Showroom } from '../scene/Showroom';
 import { createVehicleController } from '../vehicle/vehicleController';
 import { PartPanel } from './PartPanel';
 import { VoicePanel } from './VoicePanel';
+import { DemoVideoPanel } from './DemoVideoPanel';
 import './vehicle-showroom.css';
 
 export function VehicleShowroom() {
@@ -29,7 +30,8 @@ export function VehicleShowroom() {
       </header>
       <aside className="vehicle-demo__controls" aria-label="车辆与语音控制">
         <PartPanel controller={controller} />
-        <VoicePanel controller={controller} />
+        {import.meta.env.VITE_DEMO_MODE === 'showcase'
+          ? <DemoVideoPanel /> : <VoicePanel controller={controller} />}
       </aside>
       <div className="vehicle-demo__hud">
         <span>拖动旋转 <span aria-hidden="true">·</span> 滚轮缩放</span>
