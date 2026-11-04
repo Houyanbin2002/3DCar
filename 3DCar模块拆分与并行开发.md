@@ -1,0 +1,62 @@
+# 3DCar 模块拆分与并行开发
+
+| 项目 | 内容 |
+| --- | --- |
+| 文档版本 | v1.0 |
+| 日期 | 2026-11-04 |
+| 需求与架构基线 | [需求 v1.3](./3D仿真车模交互Demo需求文档.md) · [架构 v1.2](./3D仿真车模Demo落地方案与项目架构.md) |
+| Git 基线 | `main` 的初始脚手架提交 |
+| 开发方式 | 四个模块、三条功能分支，在 `codex/integration` 联调后合入 `main` |
+
+## 1. 公共基线
+
+`main` 提供 Vite、React 19、TypeScript、Three.js 和 React Three Fiber 的依赖锁文件、浏览器入口和构建脚本。使用 Node.js 22.12+ 的 22.x 版本，先运行 `npm ci`，再用 `npm run dev` 启动。`npm run build` 会先检查 TypeScript，再构建静态页面。
+
+`src/contracts/vehicle.ts` 和 `shared/intent.ts` 是并行开发的公共接口。功能分支各自维护所属目录和验证入口。`src/App.tsx`、公共契约、根依赖与锁文件、全局布局样式和发布工作流由联调分支统一维护。涉及公共契约或根依赖的变更，先确认接口影响并同步给其他分支。
+
+## 2. 四个模块与三条功能分支
+
+3D 场景与车辆小窗要一起调车身热点、相机和界面布局，放在同一分支可减少交接。语音和模型接口通过小而明确的契约协作，可以分别推进。单人顺序开发时，按以下四个模块分次提交即可。
+
+| 模块 | 分支与负责路径 | 实施内容 | 独立验收 |
+| --- | --- | --- | --- |
+| 3D 场景 | `codex/vehicle-interaction`，`src/scene/**`、`public/models/**`、场景灯光资产 | 接入已锁定版本的 FormDrive GLB，保留署名和许可。完成暗棚布光、拖转缩放、部件节点绑定、四门四窗和前后备箱动画、射线拾取及窗框热点。 | 用场景验证页直接调用驱动逐一开合 10 个部件，验证开门时窗可升降、降窗后可点回、空白点击和拖拽松手无误触。对应 A02–A03。 |
+| 车辆控制与小窗 | `codex/vehicle-interaction`，`src/vehicle/**`、`src/ui/PartPanel.tsx` 及其样式 | 实现车辆控制器、动作排队、模拟引擎状态、部件状态订阅和半透明部件小窗。小窗按车门、车窗、备箱分组，四窗按方位排成 2×2。 | 注入模拟场景驱动，验证按钮切换、动作到位才更新稳定状态、同部件并发处理、批量门窗和重复语音目标。对应 A03、A07 的状态与执行层。 |
+| 浏览器语音 | `codex/voice-control`，`src/voice/**`、`src/ui/VoicePanel.tsx` 及其样式 | 实现中文转写、唤醒和超时、多指令解析、语音状态、模型客户端、播报及一次确认。明确指令和已知模糊指令走本地。 | 注入模拟控制器和模型响应。覆盖无唤醒、单轮多指令、部分有效、无标点转写、确认／取消／超时、接口失败及过期响应，再用真实麦克风试说。对应 A04–A14 中的浏览器端行为。 |
+| 云端模型接口 | `codex/intent-api`，`server/**` | 实现独立 HTTPS 模型接口、运行时密钥配置、请求与响应校验、跨域、限流、用量约束及模型超时。服务商、模型和部署平台在接口验证时选定。 | 用模拟模型和 HTTP 请求验证 `ventilate`、`unsupported`、非法输入、限流和上游失败。再用服务端 Secret 在测试环境联通实际模型。对应 A13–A15 的接口侧。 |
+
+需要浏览器验证入口时，各前端分支可以在 `dev/scene/`、`dev/vehicle-ui/` 或 `dev/voice/` 增加独立的 `index.html` 和入口组件，通过 Vite 开发服务器直接打开。生产构建的页面入口为项目根目录的 `index.html`。
+
+## 3. 接口与并行边界
+
+### 3.1 3D 场景与车辆控制器
+
+- `Showroom` 以 `ShowroomProps` 接收 `onDriverChange` 和 `onPartClick`。车模的 10 个部件完成绑定后注册 `VehicleSceneDriver`，卸载时传入 `null`。热点点击输出业务 `PartId`，GLB 节点名和三维变换由场景内部管理。
+- `VehicleSceneDriver.setPartOpen(partId, open)` 在动画到位后完成。加载或动作异常通过失败结果反映到控制器。`resetView()` 由场景恢复初始相机。
+- `VehicleController` 提供 `getSnapshot()`、`subscribe()`、`attachScene()`、`togglePart()` 和 `execute()`。订阅快照可接入 React 的 `useSyncExternalStore`，同一状态使用稳定快照。`open` 表示已到位的状态，`targetOpen` 表示本次目标，`moving` 表示动画进行中。
+- `execute()` 支持单部件、全车门或全车窗、模拟引擎三类目标状态。按输入顺序执行，组内可并行，整组到位后才推进下一条。`onResult` 用于逐条反馈。取消信号跳过未下发动作，已下发的动画自然完成。
+
+### 3.2 语音与模型接口
+
+- 语音以 `VehicleController.execute()` 提交明确动作或已确认的开窗建议，用 `getSnapshot()` 选择当前仍升起的车窗。开发时可注入满足相同接口的模拟控制器。
+- `shared/intent.ts` 约定 `POST /api/intent`。请求 `{"text":"车里有点闷热"}`，返回 `{"intent":"ventilate"}` 或 `{"intent":"unsupported"}`。语音分支可用模拟响应独立开发确认流程，接口分支可用模拟上游独立验证 HTTP 行为。
+- 前端构建只使用公开的 `VITE_INTENT_API_URL`，模型 Key 由独立接口的服务端 Secret 提供。模型输出进入建议流程，用户确认后才由车辆控制器执行。
+
+## 4. 并行工作与合并顺序
+
+三条功能分支和 `codex/integration` 从同一个 `main` 基线开始。并行开发可使用独立 Git worktree，以便每条分支在各自目录安装依赖、运行验证。示例命令从项目根目录执行。
+
+```bash
+git worktree add ../3DCar-vehicle codex/vehicle-interaction
+git worktree add ../3DCar-voice codex/voice-control
+git worktree add ../3DCar-intent-api codex/intent-api
+```
+
+1. **功能分支先各自验证。** 提交前运行 `npm run build`，并记录独立验证的命令、结果及尚待联调的用例。涉及模型或运行时服务的配置，附环境变量名和配置位置。
+2. **先合并车辆交互。** 将 `codex/vehicle-interaction` 合入 `codex/integration`，在 `App.tsx` 装配场景与控制器。先验收 10 个部件的独立动画、拾取和面板同步。
+3. **再合并语音和模型接口。** 合入 `codex/voice-control`，用模拟模型响应验证明确指令和一次确认。合入 `codex/intent-api` 后，配置真实接口地址，在测试站走通授权、唤醒、模型请求、确认及开窗。
+4. **预演并发布。** 在联调分支配置 Pages 工作流和独立接口部署。Pages 项目站点的构建环境设置 `PAGES_BASE=/<仓库名>/`，GLB 路径使用 `import.meta.env.BASE_URL`。先在 HTTPS 测试环境走通 A02–A14，并检查服务端密钥与限流。通过后合入 `main` 发布，再用正式地址验收 A01–A15，检查主页和 README 入口，并在桌面 Chrome、Edge 实测语音。
+
+每次合并后都执行 `npm run build`。如 `main` 在并行期间有其他变更，联调分支先同步 `main`，重新验证后再合入。
+
+独立验收用于确认每个模块能遵循接口工作。发布验收还要在真实页面验证三条跨模块链路，包括点击车身后动画和小窗同步、真实麦克风驱动开合，以及线上模型建议经确认后驱动指定车窗。
