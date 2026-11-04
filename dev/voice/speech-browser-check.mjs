@@ -10,9 +10,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 const directory = process.env.ASR_CORPUS_DIR || join(tmpdir(), '3dcar-asr-corpus');
 const amount = Number(process.env.SPEECH_AMOUNT || '1');
 const dialogueMode = process.env.SPEECH_DIALOGUE === '1';
+const intentMode = process.env.SPEECH_INTENT === '1';
 const genericHalf = amount === 0.5;
-const confirmation = process.env.SPEECH_CONFIRM === '1' || genericHalf || dialogueMode;
-const files = dialogueMode ? ['case-17.wav', 'case-18.wav', 'confirm.wav', 'confirm.wav', 'case-19.wav']
+const confirmation = !intentMode && (process.env.SPEECH_CONFIRM === '1' || genericHalf || dialogueMode);
+const files = intentMode ? ['case-10.wav', 'case-21.wav', 'case-22.wav']
+  : dialogueMode ? ['case-17.wav', 'case-18.wav', 'case-19.wav']
   : genericHalf ? ['case-14.wav', 'confirm.wav'] : amount === 0.25 ? ['case-13.wav']
   : confirmation ? ['case-10.wav', 'confirm.wav'] : ['case-02.wav'];
 const clips = await Promise.all(files
@@ -97,9 +99,9 @@ try {
       await context.resume();
       // The confirmation answer intentionally arrives later than the old 5s limit.
       source.start(context.currentTime + (index === 0 ? 3 : 8));
-      if (${dialogueMode} && index === 2) {
+      if (${dialogueMode || intentMode} && index === 1) {
         const followup = context.createBufferSource();
-        followup.buffer = await context.decodeAudioData(Uint8Array.from(atob(clips[4]), c => c.charCodeAt(0)).buffer);
+        followup.buffer = await context.decodeAudioData(Uint8Array.from(atob(clips[2]), c => c.charCodeAt(0)).buffer);
         followup.connect(destination);
         followup.start(context.currentTime + 8 + source.buffer.duration + 5);
       }
@@ -110,14 +112,16 @@ try {
   await send('Page.navigate', { url: process.env.PREVIEW_URL || 'http://127.0.0.1:5173/' });
   await waitFor(() => evaluate('document.querySelector("[data-scene-ready=true]") !== null'));
   assert.equal(await evaluate('document.querySelectorAll("[data-part][data-open=true]").length'), 0);
+  await evaluate(`window.__phases=[];new MutationObserver(()=>window.__phases.push(document.querySelector('.voice-panel').dataset.phase)).observe(document.querySelector('.voice-panel'),{attributes:true,attributeFilter:['data-phase']})`);
   const point = await evaluate('(()=>{const r=document.querySelector(".voice-panel__toggle").getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2}})()');
   await send('Input.dispatchMouseEvent', { type: 'mousePressed', ...point, button: 'left', buttons: 1, clickCount: 1 });
   await send('Input.dispatchMouseEvent', { type: 'mouseReleased', ...point, button: 'left', buttons: 0, clickCount: 1 });
-  if (dialogueMode) {
+  if (dialogueMode || intentMode || (confirmation && !genericHalf)) {
     await waitFor(() => evaluate('document.querySelector(".voice-panel").dataset.phase === "dialogue"'));
-    console.log('PASS real model clarification, accepting spoken window target without a wake word');
+    assert.equal(await evaluate('document.querySelectorAll("[data-part][data-open=true]").length'), 0);
+    console.log('PASS real model clarification or suggestion; accepts full spoken replies without fixed confirmation words');
   }
-  if (confirmation) {
+  if (genericHalf) {
     await waitFor(() => evaluate('document.querySelector(".voice-panel").dataset.phase === "confirming"'));
     assert.equal(await evaluate('document.querySelectorAll("[data-part][data-open=true]").length'), 0, 'No vehicle action before voice consent');
     await delay(6000);
@@ -126,19 +130,29 @@ try {
   }
   if (dialogueMode) {
     await waitFor(() => evaluate('Number(document.querySelector("[data-part=frontLeftWindow]").dataset.openness) === 0.5'));
-    console.log('PASS short answer 左前车窗 + 可以 placed only the left-front window at 50%');
-    await waitFor(() => evaluate('document.querySelector(".voice-panel").dataset.phase === "confirming"'));
-    assert.equal(await evaluate('Number(document.querySelector("[data-part=frontLeftWindow]").dataset.openness)'), 0.5);
+    console.log('PASS short answer 左前车窗 directly placed only the left-front window at 50%');
     await waitFor(() => evaluate('Number(document.querySelector("[data-part=frontLeftWindow]").dataset.openness) === 0.75'));
-    console.log('PASS 再低一点 retained the previous target and added 25% only after spoken consent');
+    console.log('PASS 再低一点 retained the previous target and directly added 25%');
+  } else if (intentMode) {
+    await waitFor(() => evaluate('[...document.querySelectorAll("[data-openness]")].every(node=>Number(node.dataset.openness) === 1)'));
+    console.log('PASS 帮我降下全部车窗吧 replaced the single-window suggestion and directly lowered all four');
+    await waitFor(() => evaluate('[...document.querySelectorAll("[data-openness]")].every(node=>Number(node.dataset.openness) === 0)'));
+    console.log('PASS 那你帮我升起吧 directly raised all four using dialogue context');
   } else await waitFor(() => evaluate('document.querySelectorAll("[data-part][data-open=true]").length > 0'));
   await waitFor(() => evaluate('["waiting", "dialogue"].includes(document.querySelector(".voice-panel").dataset.phase)'));
   console.log('Page feedback:', await evaluate('document.querySelector(".voice-panel").innerText'));
   assert.deepEqual(errors, []);
-  if (dialogueMode) {
+  if (dialogueMode || intentMode) {
+    assert.equal(await evaluate('window.__phases.includes("confirming")'), false, 'No extra confirmation gate');
+  }
+  if (intentMode) {
+    assert.equal(await evaluate('document.querySelectorAll("[data-part][data-open=true]").length'), 0);
+    assert.ok(modelRequests >= 5);
+    console.log('PASS real ASR + real Qwen modified intent + direct all-window actions without saying 可以');
+  } else if (dialogueMode) {
     assert.equal(await evaluate('document.querySelectorAll("[data-part][data-open=true]").length'), 1);
     assert.ok(modelRequests >= 5);
-    console.log('PASS real ASR + real Qwen multi-turn clarification + two spoken confirmations + actual window at 75%');
+    console.log('PASS real ASR + real Qwen multi-turn clarification + direct contextual control at 75%');
   } else if (genericHalf) {
     const positions = await evaluate('[...document.querySelectorAll("[data-openness]")].map(node=>Number(node.dataset.openness))');
     assert.equal(positions.length, 4);

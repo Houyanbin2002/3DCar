@@ -99,8 +99,12 @@ export class ToolRegistry {
   }
 }
 
-export function createVehicleToolRegistry(controller: VehicleController): ToolRegistry {
+export function createVehicleToolRegistry(
+  controller: VehicleController,
+  options: { confirmation?: 'always' | 'never' } = {},
+): ToolRegistry {
   const registry = new ToolRegistry();
+  const confirmation = options.confirmation ?? 'never';
   const prepareAction = (action: VehicleAction): PreparedTool => ({
     label: describeAction(action),
     async execute(signal) {
@@ -127,7 +131,7 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
         },
       },
     },
-    confirmation: 'always', idempotent: true,
+    confirmation, idempotent: true,
     context: () => Object.fromEntries(WINDOW_IDS.map((id) => [id, controller.getSnapshot().parts[id]])),
     prepare: (args) => prepareAction(args.target === 'all'
       ? { kind: 'group', group: 'windows', open: Number(args.openness) > 0, openness: args.openness as number }
@@ -145,7 +149,7 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
         },
       },
     },
-    confirmation: 'always',
+    confirmation,
     idempotent: true,
     context: () => controller.getSnapshot().parts,
     prepare: (args) => prepareAction({ kind: 'part', partId: args.partId as typeof PART_IDS[number], open: args.open as boolean }),
@@ -161,7 +165,7 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
         },
       },
     },
-    confirmation: 'always',
+    confirmation,
     idempotent: true,
     context: () => controller.getSnapshot().parts,
     prepare: (args) => prepareAction({ kind: 'group', group: args.group as 'doors' | 'windows', open: args.open as boolean }),
@@ -174,7 +178,7 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
         parameters: { type: 'object', additionalProperties: false, required: ['running'], properties: { running: { type: 'boolean' } } },
       },
     },
-    confirmation: 'always',
+    confirmation,
     idempotent: true,
     context: () => ({ running: controller.getSnapshot().engineRunning }),
     prepare: (args) => prepareAction({ kind: 'engine', running: args.running as boolean }),

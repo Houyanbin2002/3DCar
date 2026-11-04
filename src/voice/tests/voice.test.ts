@@ -59,7 +59,7 @@ function deferred<T>() {
 
 const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
-function setup(overrides: { intent?: IntentClient; output?: SpeechOutput; control?: ControlClient } = {}) {
+function setup(overrides: { intent?: IntentClient; output?: SpeechOutput; control?: ControlClient; legacyConfirmation?: boolean } = {}) {
   const clock = new FakeClock();
   const input = new FakeInput();
   const vehicle = createSimulatedVehicle();
@@ -83,7 +83,8 @@ function setup(overrides: { intent?: IntentClient; output?: SpeechOutput; contro
       ? { toolCalls: [{ id: 'test-call', name: 'set_vehicle_part', arguments: { partId, open: true } }], reply: '' }
       : { toolCalls: [], reply: '车窗已经降下了。' };
   };
-  const tools = createVehicleToolRegistry(vehicle);
+  // Keep explicit confirmation-policy coverage alongside default model-directed execution tests.
+  const tools = createVehicleToolRegistry(vehicle, { confirmation: overrides.legacyConfirmation === false ? 'never' : 'always' });
   const control = new VoiceControl({ controller: vehicle, clock, input, output, controlClient: overrides.control ?? controlClient, tools });
   control.start();
   return { control, clock, input, vehicle, calls, intents, spoken, tools };
@@ -132,6 +133,71 @@ test('最终转写即使没有 speechend 也进入模型，保留相对调整原
   assert.equal(heard, '车窗再低一点');
   assert.equal(s.control.getSnapshot().phase, 'dialogue');
   assert.equal(s.calls.length, 0);
+  s.control.stop();
+});
+
+test('模型建议后修改为全部降窗并直接升起：按最新意图执行，不要求固定确认词', async () => {
+  const texts: string[] = [];
+  const s = setup({ legacyConfirmation: false, control: async (request) => {
+    if (request.history) return { toolCalls: [], reply: '实际车窗状态已核对。' };
+    texts.push(request.text);
+    if (texts.length === 1) return { toolCalls: [], reply: '要我帮你降下左前车窗吗？' };
+    assert.ok(request.dialogue?.some((message) => message.content.includes('左前车窗')));
+    return { toolCalls: [{ id: 'group-' + texts.length, name: 'set_vehicle_group', arguments: { group: 'windows', open: texts.length === 2 } }], reply: '' };
+  } });
+  const say = async (text: string) => { s.input.say(text); s.clock.advance(1_000); await flush(); };
+  await say('小满同学，车里有点闷热');
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  assert.equal(s.calls.length, 0, '自然语言建议不预先执行');
+  await say('帮我降下全部车窗吧');
+  assert.deepEqual(s.calls, [[{ kind: 'group', group: 'windows', open: true }]]);
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  await say('那你帮我升起吧');
+  assert.deepEqual(s.calls[1], [{ kind: 'group', group: 'windows', open: false }]);
+  assert.deepEqual(texts, ['车里有点闷热', '帮我降下全部车窗吧', '那你帮我升起吧']);
+  for (const id of ['frontLeftWindow', 'frontRightWindow', 'rearLeftWindow', 'rearRightWindow'] as const) {
+    assert.equal(s.vehicle.getSnapshot().parts[id].open, false);
+  }
+  s.control.stop();
+});
+
+test('模型补全短答后直接执行，工具默认无需额外确认', async () => {
+  const s = setup({ legacyConfirmation: false, control: async (request) => {
+    if (request.history) return { toolCalls: [], reply: '已打开到一半。' };
+    if (!request.dialogue?.length) return { toolCalls: [], reply: '你想将哪扇车窗打开一半？' };
+    assert.equal(request.text, '左前车窗');
+    return { toolCalls: [{ id: 'half', name: 'set_window_openness', arguments: { target: 'frontLeftWindow', openness: 0.5 } }], reply: '' };
+  } });
+  s.input.say('小满同学，把窗户放到一半的位置');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(s.calls.length, 0);
+  s.input.say('左前车窗');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(s.vehicle.getSnapshot().parts.frontLeftWindow.openness, 0.5);
+  assert.equal(s.control.getSnapshot().phase, 'dialogue');
+  assert.equal(createVehicleToolRegistry(s.vehicle).prepare({ toolCalls: [{ id: 'group', name: 'set_vehicle_group', arguments: { group: 'windows', open: true } }], reply: '' }).requiresConfirmation, false);
+  s.control.stop();
+});
+
+test('等待确认时可直接修改窗位和开度，旧建议不再执行', async () => {
+  const s = setup({ legacyConfirmation: false, control: async (request) => {
+    if (request.history) return { toolCalls: [], reply: '已按新请求打开左前窗。' };
+    assert.equal(request.text, '改成左前窗打开一点吧');
+    assert.ok(request.dialogue?.some((message) => message.content.includes('所有车窗')));
+    return { toolCalls: [{ id: 'replacement', name: 'set_window_openness', arguments: { target: 'frontLeftWindow', openness: 0.25 } }], reply: '' };
+  } });
+  s.input.say('小满同学，车窗打开一半');
+  s.clock.advance(1_000);
+  await flush();
+  assert.equal(s.control.getSnapshot().phase, 'confirming');
+  s.input.say('改成左前窗打开一点吧');
+  s.clock.advance(1_000);
+  await flush();
+  assert.deepEqual(s.calls, [[{ kind: 'part', partId: 'frontLeftWindow', open: true, openness: 0.25 }]]);
+  s.control.confirm(true);
+  assert.equal(s.calls.length, 1, '迟到的确认不能复活旧建议');
   s.control.stop();
 });
 
@@ -581,7 +647,7 @@ test('确认计时从语音服务就绪开始，连接耗时不占用回答时�
 
 test('临近超时开始回答时等待最终转写，否定和含糊答复不执行', async () => {
   for (const reply of ['不用了', '不可以', '可以吗']) {
-    const s = setup();
+    const s = setup({ intent: async (text) => ({ intent: text === '可以吗' ? 'unsupported' : 'ventilate' }) });
     s.input.say('小满同学，车里有点闷热');
     s.clock.advance(1_000);
     await flush();
@@ -594,7 +660,10 @@ test('临近超时开始回答时等待最终转写，否定和含糊答复不�
     await flush();
     assert.equal(s.calls.length, 0);
     if (reply === '可以吗') {
-      assert.equal(s.control.getSnapshot().phase, 'confirming');
+      assert.equal(s.control.getSnapshot().phase, 'listening');
+      s.clock.advance(1_000);
+      await flush();
+      assert.equal(s.control.getSnapshot().phase, 'dialogue');
       s.control.cancel();
     } else assert.equal(s.control.getSnapshot().phase, 'waiting');
     s.input.say('可以');

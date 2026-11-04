@@ -22,7 +22,9 @@ $texts = @(
   '小满同学，把窗户放到一半的位置',
   '左前车窗',
   '再低一点',
-  '好了'
+  '好了',
+  '帮我降下全部车窗吧',
+  '那你帮我升起吧'
 )
 $voices = @('Microsoft Huihui Desktop', 'Microsoft Kangkang', 'Microsoft Yaoyao')
 $cases = @()

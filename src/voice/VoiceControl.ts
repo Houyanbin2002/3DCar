@@ -82,6 +82,7 @@ export class VoiceControl {
   private pendingRuleActions: readonly VehicleAction[] | null = null;
   private confirmQuestion = '';
   private dialogueActive = false;
+  private modelDialogue = false;
   private dialogue: DialogueMessage[] = [];
   private dialogueIdleMs = defaultTiming.dialogueMs;
   private completedThisTurn = false;
@@ -165,6 +166,7 @@ export class VoiceControl {
     this.confirmQuestion = '';
     this.steps = [];
     this.dialogueActive = false;
+    this.modelDialogue = false;
     this.dialogue = [];
     this.completedThisTurn = this.plannedThisTurn = false;
     this.commandText = '';
@@ -266,6 +268,16 @@ export class VoiceControl {
     this.update({ transcript: this.commandText });
   }
 
+  private continueTurn(text: string, model = this.modelDialogue): void {
+    const dialogue = this.dialogue;
+    const steps = this.steps;
+    this.beginTurn(text);
+    this.dialogueActive = true;
+    this.modelDialogue = model;
+    this.dialogue = dialogue;
+    this.steps = steps;
+  }
+
   private receive(update: TranscriptUpdate): void {
     for (const text of update.finals) {
       const heard = this.snapshot.phase === 'waiting' ? this.wakeFragment + text : text;
@@ -277,12 +289,7 @@ export class VoiceControl {
           this.finish('本轮对话已结束，请说“小满同学”开启新一轮。');
           continue;
         }
-        const dialogue = this.dialogue;
-        const steps = this.steps;
-        this.beginTurn(text);
-        this.dialogueActive = true;
-        this.dialogue = dialogue;
-        this.steps = steps;
+        this.continueTurn(text);
       } else if (this.snapshot.phase === 'waiting') {
         const normalized = normalizeSpeech(heard);
         this.wakeFragment = ['小满同', '小满', '小'].find((prefix) => normalized.endsWith(prefix)) ?? '';
@@ -296,7 +303,7 @@ export class VoiceControl {
         this.update({ transcript: text });
         if (/^(需要|需要的|好的|好|好啊|好呀|好吧|是的|可以|可以的|可以啊|行|行的|没问题|同意|打开吧|降下吧|执行吧|确认)$/u.test(reply)) this.confirm(true);
         else if (/^(不用|不用了|不需要|不要|不要了|不可以|取消|算了)$/u.test(reply)) this.confirm(false);
-        else this.armConfirmation('没听清确认答复，请直接说“可以”或“不用”。');
+        else this.continueTurn(text, true);
       } else if (/^(取消|算了|不用)$/u.test(normalizeSpeech(text))
         && ['thinking', 'executing'].includes(this.snapshot.phase)) {
         this.cancel();
@@ -324,7 +331,7 @@ export class VoiceControl {
 
   private armConfirmation(message?: string): void {
     if (this.snapshot.phase !== 'confirming' || (!this.pendingTools && !this.pendingRuleActions) || !this.inputReady) return;
-    this.update({ message: message ?? `${this.confirmQuestion} 请直接说“可以”或“不用”（${Math.round(this.timing.confirmMs / 1000)} 秒内，无需唤醒）。` });
+    this.update({ message: message ?? `${this.confirmQuestion} 可直接回答或修改操作（${Math.round(this.timing.confirmMs / 1000)} 秒内，无需唤醒）。` });
     this.schedule('confirm', this.timing.confirmMs, () => this.finish('确认超时，已取消本轮建议，请说“小满同学”重新唤醒。'));
   }
 
@@ -337,6 +344,10 @@ export class VoiceControl {
     const text = this.commandText;
     this.cancelTimer('turn');
     this.cancelTimer('wake');
+    if (this.modelDialogue) {
+      if (!await this.planTools(text)) await this.advance();
+      return;
+    }
     const route = routeCommand(text);
     if (route.cancelled) { this.finish('本轮已取消。'); return; }
     this.steps = route.steps;
@@ -424,6 +435,11 @@ export class VoiceControl {
   }
 
   private async askConfirmation(question: string, turn: number): Promise<void> {
+    if (!this.plannedThisTurn) {
+      this.remember('user', this.commandText);
+      this.remember('assistant', question);
+      this.plannedThisTurn = true;
+    }
     this.confirmQuestion = question;
     this.pauseInput();
     this.update({ phase: 'speaking', message: question });
@@ -443,6 +459,7 @@ export class VoiceControl {
       if (!this.current(turn)) return false;
       const batch = this.tools.prepare(response);
       this.dialogueActive = true;
+      this.modelDialogue = true;
       this.plannedThisTurn = true;
       this.remember('user', text);
       if (!batch.tools.length) {

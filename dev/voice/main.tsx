@@ -14,9 +14,12 @@ import './dev.css';
 const vehicle = createSimulatedVehicle();
 const simulatedInput = new SimulatedInput();
 const simulatedOutput = { speak: async () => {} };
-const simulatedControl: ControlClient = async ({ text, context, history }) => {
+const simulatedControl: ControlClient = async ({ text, context, history, dialogue }) => {
   if (history) return { toolCalls: [], reply: '已核对本轮执行结果。' };
-  if (!/闷|热|透气/u.test(text)) return { toolCalls: [], reply: '请补充动作和具体部件，例如打开左前窗。' };
+  if (/闷|热|透气/u.test(text)) return { toolCalls: [], reply: '要我帮你降下左前车窗吗？' };
+  if (/全部|所有/u.test(text)) return { toolCalls: [{ id: 'simulated-group', name: 'set_vehicle_group', arguments: { group: 'windows', open: !/升|关/u.test(text) } }], reply: '' };
+  if (/升|关/u.test(text) && dialogue?.length) return { toolCalls: [{ id: 'simulated-raise', name: 'set_vehicle_part', arguments: { partId: 'frontLeftWindow', open: false } }], reply: '' };
+  if (!/可以|好的|需要|降|打开/u.test(text) || !dialogue?.length) return { toolCalls: [], reply: '请补充动作和具体部件，例如打开左前窗。' };
   const parts = context.set_vehicle_part as Record<string, PartSnapshot>;
   const partId = WINDOW_IDS.find((id) => !parts[id].open && !parts[id].moving);
   return partId
