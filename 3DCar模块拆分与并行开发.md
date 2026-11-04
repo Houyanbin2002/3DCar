@@ -4,7 +4,7 @@
 | --- | --- |
 | 文档版本 | v1.0 |
 | 日期 | 2026-11-04 |
-| 需求与架构基线 | [需求 v1.3](./3D仿真车模交互Demo需求文档.md) · [架构 v1.2](./3D仿真车模Demo落地方案与项目架构.md) |
+| 需求与架构基线 | [需求 v1.4](./3D仿真车模交互Demo需求文档.md) · [架构 v1.3](./3D仿真车模Demo落地方案与项目架构.md) |
 | Git 基线 | `main` 的初始脚手架提交 |
 | 开发方式 | 四个模块、三条功能分支，在 `codex/integration` 联调后合入 `main` |
 
@@ -12,7 +12,7 @@
 
 `main` 提供 Vite、React 19、TypeScript、Three.js 和 React Three Fiber 的依赖锁文件、浏览器入口和构建脚本。使用 Node.js 22.12+ 的 22.x 版本，先运行 `npm ci`，再用 `npm run dev` 启动。`npm run build` 会先检查 TypeScript，再构建静态页面。
 
-`src/contracts/vehicle.ts` 和 `shared/intent.ts` 是并行开发的公共接口。功能分支各自维护所属目录和验证入口。`src/App.tsx`、公共契约、根依赖与锁文件、全局布局样式和发布工作流由联调分支统一维护。涉及公共契约或根依赖的变更，先确认接口影响并同步给其他分支。
+`src/contracts/vehicle.ts`、`shared/intent.ts` 和新增的 `shared/control.ts` 是公共接口。工具调用契约已在语音与模型接口 worktree 同步为相同文件。功能分支各自维护所属目录，联调分支负责 `App.tsx`、根依赖和布局装配。
 
 ## 2. 四个模块与三条功能分支
 
@@ -39,7 +39,7 @@
 ### 3.2 语音与模型接口
 
 - 语音以 `VehicleController.execute()` 提交明确动作或已确认的开窗建议，用 `getSnapshot()` 选择当前仍升起的车窗。开发时可注入满足相同接口的模拟控制器。
-- `shared/intent.ts` 约定 `POST /api/intent`。请求 `{"text":"车里有点闷热"}`，返回 `{"intent":"ventilate"}` 或 `{"intent":"unsupported"}`。语音分支可用模拟响应独立开发确认流程，接口分支可用模拟上游独立验证 HTTP 行为。
+- 新链路通过 `shared/control.ts` 约定 `POST /api/intent` 的 `text`、`tools`、`context` 请求及 `toolCalls`、`reply` 响应。旧单字段文本分类契约继续兼容。语音分支管理注册表与执行函数，接口分支注入本次工具 Schema 并校验模型调用。
 - 前端构建只使用公开的 `VITE_INTENT_API_URL`，模型 Key 由独立接口的服务端 Secret 提供。模型输出进入建议流程，用户确认后才由车辆控制器执行。
 
 ## 4. 并行工作与合并顺序
@@ -55,7 +55,7 @@ git worktree add ../3DCar-intent-api codex/intent-api
 1. **功能分支先各自验证。** 提交前运行 `npm run build`，并记录独立验证的命令、结果及尚待联调的用例。涉及模型或运行时服务的配置，附环境变量名和配置位置。
 2. **先合并车辆交互。** 将 `codex/vehicle-interaction` 合入 `codex/integration`，在 `App.tsx` 装配场景与控制器。先验收 10 个部件的独立动画、拾取和面板同步。
 3. **再合并语音和模型接口。** 合入 `codex/voice-control`，用模拟模型响应验证明确指令和一次确认。合入 `codex/intent-api` 后，配置真实接口地址，在测试站走通授权、唤醒、模型请求、确认及开窗。
-4. **预演并发布。** 在联调分支配置 Pages 工作流和独立接口部署。Pages 项目站点的构建环境设置 `PAGES_BASE=/<仓库名>/`，GLB 路径使用 `import.meta.env.BASE_URL`。先在 HTTPS 测试环境走通 A02–A14，并检查服务端密钥与限流。通过后合入 `main` 发布，再用正式地址验收 A01–A15，检查主页和 README 入口，并在桌面 Chrome、Edge 实测语音。
+4. **预演并发布。** 在联调分支配置 Pages 工作流和独立接口部署。Pages 项目站点的构建环境设置 `PAGES_BASE=/<仓库名>/`，GLB 路径使用 `import.meta.env.BASE_URL`。先在 HTTPS 测试环境检查控车、工具调用、服务端密钥与限流。通过后合入 `main` 发布，再用正式地址验收 A01–A17，并在桌面 Chrome、Edge 实测语音。
 
 每次合并后都执行 `npm run build`。如 `main` 在并行期间有其他变更，联调分支先同步 `main`，重新验证后再合入。
 

@@ -1,0 +1,37 @@
+.voice-panel {
+  box-sizing: border-box;
+  width: min(360px, 100%);
+  padding: 22px;
+  color: #f0f2f3;
+  background: rgb(28 32 36 / 72%);
+  border-radius: 18px;
+  box-shadow: 0 18px 50px rgb(0 0 0 / 22%);
+  backdrop-filter: blur(20px);
+  font-family: system-ui, "Microsoft YaHei", sans-serif;
+  line-height: 1.6;
+}
+.voice-panel__header { display: flex; align-items: center; gap: 12px; }
+.voice-panel__mic { width: 30px; height: 30px; stroke: #4de1e5; stroke-width: 1.7; flex-shrink: 0; }
+.voice-panel__title { flex: 1; }
+.voice-panel h2 { margin: 0; font-size: 18px; font-weight: 600; }
+.voice-panel__title span { color: #a3acb2; font-size: 12px; }
+.voice-panel button {
+  cursor: pointer; padding: 7px 12px; color: #e8fafa; font: inherit; font-size: 13px;
+  border: 1px solid #405056; border-radius: 10px; background: rgb(255 255 255 / 4%);
+}
+.voice-panel button:hover { background: rgb(77 225 229 / 12%); }
+.voice-panel button:focus-visible { outline: 2px solid #4de1e5; outline-offset: 3px; }
+.voice-panel button:disabled { opacity: .45; cursor: default; }
+.voice-panel .voice-panel__toggle { color: #64edf0; border-color: #3ba9b2; white-space: nowrap; }
+.voice-panel__message { margin: 18px 0 8px; font-size: 14px; }
+.voice-panel__transcript { color: #aeb8bf; font-size: 12px; overflow-wrap: anywhere; }
+.voice-panel__feedback { max-height: 150px; overflow-y: auto; padding-left: 18px; color: #bac6cc; font-size: 12px; }
+.voice-panel__actions { display: flex; gap: 10px; margin: 14px 0; }
+.voice-panel__actions button { flex: 1; }
+.voice-panel__actions button:first-child { border-color: #4de1e5; color: #64edf0; }
+.voice-panel .voice-panel__cancel { font-size: 12px; padding: 4px 10px; }
+.voice-panel__example { margin: 18px 0 8px; padding-top: 14px; border-top: 1px solid rgb(255 255 255 / 10%); font-size: 13px; }
+.voice-panel__privacy { display: block; color: #909ba3; font-size: 11px; }
+.voice-panel[data-phase="listening"] .voice-panel__mic,
+.voice-panel[data-phase="confirming"] .voice-panel__mic { filter: drop-shadow(0 0 5px #4de1e5); }
+.voice-panel[data-phase="error"] .voice-panel__message { color: #f5bb9c; }

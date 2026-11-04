@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.2（对齐项目脚手架与分支边界） |
+| 文档版本 | v1.4（工具观察与有界重试） |
 | 日期 | 2026-11-04 |
-| 需求基线 | [3D 仿真车模交互 Demo 需求文档 v1.3](./3D仿真车模交互Demo需求文档.md) |
+| 需求基线 | [3D 仿真车模交互 Demo 需求文档 v1.5](./3D仿真车模交互Demo需求文档.md) |
 | 技术路线 | 独立项目复用 FormDrive 的 Tesla Model 3 资产和部件动画逻辑 |
 | 界面基线 | 全屏暗棚展厅、车身热点、半透明部件小窗、独立语音卡片 |
 | 发布目标 | GitHub Pages 项目站点与独立 HTTPS 模型接口，桌面 Chrome、Edge 为正式验收环境 |
@@ -18,7 +18,7 @@
 | 车辆动画 | Three.js 节点变换、`MathUtils.damp`、R3F `useFrame` | 四门旋转、四窗升降、前后备箱开合 |
 | 观察与点击 | Three.js `OrbitControls`、射线拾取 | 拖拽、缩放、部件命中与热点定位 |
 | 语音 | Web Speech API、浏览器端中文指令规则 | 转写、唤醒、指令解析、播报和确认 |
-| 模型接口 | 独立部署的 HTTPS Serverless 函数 | 接收单轮转写，调用云端模型，返回受限意图 |
+| 模型接口 | 独立部署的 HTTPS Serverless 函数、千问 Function Calling | 接收单轮转写和运行时工具结构，返回经校验的函数调用 |
 | 发布 | GitHub Actions、GitHub Pages、Serverless 运行环境 | 静态站点和模型接口分别部署，GLB 随站点同源提供 |
 
 锁定 FormDrive 上游提交 `e2f861630035385adacd1c5fcdeae5258557cce6` 作为首版复用基准。复用该提交的 `tesla-model-3-2018.glb`、`studioConfig.js` 中 Tesla 的部件参数，以及 `VehicleModel.jsx` 中的节点匹配、原始变换保存和窗玻璃遮罩逻辑。相机、光照、点击交互、悬浮小窗、车辆控制器和语音模块按本 Demo 组织。[上游版本](https://github.com/nesdesignco/FormDrive/tree/e2f861630035385adacd1c5fcdeae5258557cce6) · [部件配置](https://github.com/nesdesignco/FormDrive/blob/e2f861630035385adacd1c5fcdeae5258557cce6/src/config/studioConfig.js) · [车辆动画](https://github.com/nesdesignco/FormDrive/blob/e2f861630035385adacd1c5fcdeae5258557cce6/src/components/scene/VehicleModel.jsx)
@@ -34,10 +34,14 @@ flowchart LR
     R[Web Speech 转写] --> V[唤醒状态机]
     V --> D[中文指令解析]
     D -->|明确动作| C
-    D -->|间接表达| I[独立模型接口]
-    I <-->|单轮文本与意图| L[云端大模型]
-    I -->|受限意图| F[页面确认状态]
-    F -->|确认后提交动作| C
+    D -->|未命中或置信度低| I[独立模型接口]
+    G[运行时工具注册表] -->|定义与状态| I
+    I <-->|单轮文本与函数调用| L[云端大模型]
+    I -->|校验后的函数调用| F[页面确认状态]
+    F -->|确认后执行工具| G
+    G -->|逐项结果与实际状态| I
+    I -->|仅原失败项的一轮重试| G
+    G -->|执行函数| C
     C --> T[Three.js 部件动画]
     T -->|动画到位| C
     C -->|部件和动作状态| P
@@ -72,12 +76,16 @@ flowchart LR
 │  ├─ voice/
 │  │  ├─ useVoiceControl.ts   # 识别会话、唤醒、播报与确认状态
 │  │  ├─ parseCommand.ts      # 本地指令解析与路由判定
-│  │  └─ intentClient.ts      # 请求独立接口、校验结果、处理超时
+│  │  ├─ intentClient.ts      # HTTP 传输和旧分类契约兼容
+│  │  ├─ controlClient.ts     # 运行时工具请求与响应校验
+│  │  ├─ toolRegistry.ts      # 工具注册、准备与逐项执行回执
+│  │  └─ runToolCycle.ts      # 结果回传、失败项重试与最终汇总
 │  └─ ui/
 │     ├─ PartPanel.tsx
 │     ├─ VoicePanel.tsx
 │     └─ showroom.css
 ├─ shared/intent.ts            # 前后端共用的模型接口契约
+├─ shared/control.ts           # 工具定义、调用、回执与重试约束
 ├─ server/                     # 模型接口，独立部署
 │  └─ intent.ts                # 请求校验、限流与模型调用
 └─ .github/workflows/pages.yml
@@ -117,27 +125,36 @@ flowchart LR
 1. **开启。** 用户点击「开启语音」后启动 `SpeechRecognition`，兼容 `webkitSpeechRecognition`，识别语言为 `zh-CN`。默认显示「语音未开启」。实际开始识别后，显示「等待唤醒」。
 2. **唤醒。** 对转写做空白和标点归一化，在等待状态下匹配固定词「小满小满」。同段有指令时保留唤醒词之后的内容。单独唤醒时进入「聆听指令」，给用户 5 秒开始说话。权限、浏览器或在线识别服务异常时，在语音卡片上给出相应提示。
 3. **收集。** 暂定用约 1 秒静默作为一轮的收尾窗口，最终值用真实试说调校。浏览器若把一轮话语分成多个识别结果，按结果序号追加已确认片段。语音开始事件或含指令的中间结果可确认用户已开始说话，动作只由本轮最终文本产生。5 秒限制的是开始说指令的时间，收尾窗口负责等待后续分句。
-4. **判定与执行。** 用白名单匹配动作、部件、方位和连接词，返回有序动作与提示。共享动作只在连接关系和后续目标都明确时继承。明确命令、多指令和已知缺参表达由本地处理，例如「打开左前门，再打开」执行第一项并提示第二项缺少对象。其余适合判定间接意图的完整表达进入 §4.2。
+4. **判定与执行。** `routeCommand()` 按规则完整性标记 `high`、`low` 或 `unmatched`。完整匹配的动作直接执行。低置信度和未匹配片段进入 §4.2，例如「打开左前门，再打开」先执行第一项，再将第二项和当前状态送给模型追问。
 5. **结束或恢复。** 执行完成、指令未识别或超时后，展示结果并回到等待唤醒。识别会话自然结束时，仅在用户仍开启语音且允许恢复的状态下重新开始。关闭语音时取消识别和本轮收集，丢弃过期回调，并撤销尚未下发的语音动作。权限、网络或识别服务错误时显示相应提示，手动控车可独立使用。[Web Speech API 规范](https://webaudio.github.io/web-speech-api/)
 
-### 4.2 大模型建议与一次确认
+### 4.2 运行时工具与一次确认
 
-1. **识别意图。** 发起模型请求时，语音卡片显示「正在理解」。请求只包含唤醒后的本轮最终转写文本。明确指令、已知缺参、含已匹配动作的多指令及取消表达在本地结束。接口超时、失败或返回 `unsupported` 时，提示用户改说具体指令并结束本轮。
-2. **生成建议。** 收到 `ventilate` 时，从当前已升起的车窗中选择一扇，优先左前窗，其余按右前、左后、右后顺序选择。页面保存待确认动作，并用目标名称生成追问。四窗均已降下时直接反馈并结束本轮。模型结果通过枚举校验后才参与建议生成。
+1. **规则路由。** 每轮按片段顺序处理。完整匹配直接交给车辆控制器，其他片段携带当前工具结构和状态送给后端。置信级别由完整规则匹配判定。
+2. **模型选择工具。** 通过千问的 `tools` 参数注入当前注册的函数与 Schema，接收 `tool_calls` 的名称和参数。`ToolRegistry.prepare()` 验证全部调用并生成待执行动作。工具执行结果用于页面反馈，目标不明确时模型直接追问。
 3. **播报与确认。** 页面显示追问并通过 `SpeechSynthesis` 播报。播报前暂停语音识别并抑制自动重启，播报结束后恢复识别并启动 5 秒确认窗口。播报不可用时，卡片展示提示后直接开始确认。确认状态只接受本轮的「需要」「不用」等明确答复。[Web Speech API 规范](https://webaudio.github.io/web-speech-api/)
-4. **执行或撤销。** 收到确认后，消费一次待确认动作并通过车辆控制器设置车窗为降下，反馈动画结果。取消、超时、关闭语音或重新唤醒时清除旧建议。请求与建议都关联当前语音轮次；退出本轮时中止请求并忽略迟到的模型或语音回调。
+4. **执行或撤销。** 首版模型调用的车辆变更统一确认后执行，本地明确规则动作直接执行。新工具可声明只读且无需确认。一次回复最多 8 个函数调用，按顺序执行。取消、超时、关闭语音或重新唤醒时清除旧建议和剩余步骤。退出本轮时中止请求并忽略旧回调。
+5. **扩展。** `ToolRegistry.register()` 登记定义、状态读取、确认策略和执行方法，返回注销方法。下次模型请求读取最新注册表。新增工具的接线示例见[工具扩展说明](./src/voice/TOOLS.md)。
+
+### 4.3 工具结果与有界 ReAct
+
+执行器为每条调用生成 `toolCallId`、`status`、`effect`、`message`，失败时增加错误码与重试资格，并尽量读取实际状态。同批仅允许独立动作，单项失败后继续处理其余独立项。`runToolCycle()` 将所有回执和原调用作为 `history` 发回接口，后端构造原 `assistant.tool_calls` 和逐条带 `tool_call_id` 的 `role: tool` 消息，再请模型判断。
+
+自动重试上限为一轮，仅允许初次失败且可恢复的同名、同参数操作，必须使用新调用 ID。前后端均拦截重放成功项、换对象、改参数或超限重试。重试绑定原工具实例及已确认计划，注销工具后旧计划失效。结果不确定时，仅已声明幂等且读回状态的工具可以标记可重试。取消和不可恢复错误禁止重试。
+
+重试后再回传结果并强制 `tool_choice: none` 生成最终说明；全部成功时同样反馈结果并禁止追加动作。包含初次规划最多请求模型 3 次，分别计入接口配额。复核超时或限流时保留执行结果，页面从回执计算最终数量。详细接入契约及错误示例见[工具扩展说明](./src/voice/TOOLS.md)。
 
 ## 5. 独立模型接口与部署边界
 
-GitHub Pages 发布车模与前端。前端用 `VITE_INTENT_API_URL` 配置独立 HTTPS 接口地址；模型服务商、模型标识和 `MODEL_API_KEY` 由后端运行时配置。密钥存放在部署平台的 Secret 中，发布时核验前端产物和公开配置。服务商与模型在接口验证阶段选定。[GitHub Pages 托管说明](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages) · [Vite 环境变量说明](https://vite.dev/guide/env-and-mode#env-variables) · [服务端 Secret 配置示例](https://developers.cloudflare.com/workers/configuration/secrets/)
+GitHub Pages 发布车模与前端。前端用 `VITE_INTENT_API_URL` 配置独立 HTTPS 接口地址。兜底模型选用阿里云 `qwen3.8-omni-flash`，完整模型地址、名称和 `MODEL_API_KEY` 由后端运行时配置。密钥本地保存在 Git 忽略的 env 文件，线上使用部署平台的 Secret。[GitHub Pages 托管说明](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages) · [Vite 环境变量说明](https://vite.dev/guide/env-and-mode#env-variables) · [服务端 Secret 配置示例](https://developers.cloudflare.com/workers/configuration/secrets/)
 
 | 接口约定 | 说明 |
 | --- | --- |
-| `POST /api/intent` | 接收 JSON，例如 `{"text":"车里有点闷热"}`。请求仅含本轮转写文本。 |
-| 支持的响应 | `{"intent":"ventilate"}` 表示建议通风；`{"intent":"unsupported"}` 表示无法匹配当前支持的意图。前端负责决定具体车窗和生成确认提示。 |
+| `POST /api/intent` | 新链路接收 `text`、`tools`、`context`，结果回传时附带最多两轮 `history`，受 `shared/control.ts` 约束。旧的单字段文本请求继续支持原分类契约。 |
+| 支持的响应 | 新链路返回 `toolCalls` 和 `reply`。工具调用含 `id`、`name`、`arguments`，由实际登记的执行函数处理。无工具调用时显示模型追问。 |
 | 失败处理 | 输入不符合约定返回 4xx，限流返回 429，上游失败返回 5xx。前端设定有限等待时间，并将失败统一转为简短的具体指令提示。 |
 
-- **请求与输出约束。** 校验请求格式和文本长度，对模型输出做枚举校验。后端将用户转写作为数据处理。应用侧按单轮临时处理转写和建议，日志记录状态、耗时和用量等运行指标。
+- **请求与输出约束。** 校验请求格式、工具定义和参数结构。服务端与浏览器分别验证模型函数名称和实参。工具请求体上限 32 KiB、最多 16 个工具。原单字段分类请求保持 4 KiB 上限。
 - **公开接口用量。** 服务端限制调用频率、请求大小、模型输出长度和总用量，并处理上游超时。浏览器跨域配置仅允许正式 Pages 的来源及显式配置的开发来源。限流与用量约束由服务端独立执行。
 
 ## 6. 实施顺序与验收
@@ -152,4 +169,4 @@ GitHub Pages 发布车模与前端。前端用 `VITE_INTENT_API_URL` 配置独�
 
 构建时使用锁文件安装依赖。项目站点构建环境通过 `PAGES_BASE=/<仓库名>/` 设置 Vite `base`。GLB、贴图等资源引用遵循这个基路径，由 Actions 构建并发布 `dist/`。模型加载显示进度或等待提示，失败时提供重试。先以原始 GLB 测量真实网络下的冷启动，再决定是否需要压缩。若更换或压缩资产，重新验证节点命名、玻璃材质和全部部件动作。[Vite 的 GitHub Pages 部署指南](https://vite.dev/guide/static-deploy.html#github-pages)
 
-发布验收以 v1.3 的 A01–A15 为准。A01–A10 覆盖基础交付，A11–A15 覆盖本次新增的智能语音和独立模型接口。当前已核对上游资产元数据和动画源码；实际光影、部件动作、两款浏览器的语音表现与云端接口由上述阶段验证。
+发布验收以 v1.5 的 A01–A19 为准。A01–A10 覆盖基础交付，A11–A15 覆盖智能语音和独立接口，A16–A17 验证模型直接选择函数及运行时工具扩展，A18–A19 验证部分成功、失败项重试与取消。实际车模与麦克风的联动在集成环境验证。
