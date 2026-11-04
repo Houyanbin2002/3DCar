@@ -1,0 +1,106 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #root { width: 100%; height: 100%; }
+
+body {
+  margin: 0;
+  background: #f5f6f8;
+  color: #243549;
+  color-scheme: light;
+  font-family: Inter, 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.vehicle-demo {
+  position: relative;
+  height: 100%;
+  overflow: hidden;
+}
+
+.vehicle-demo__title {
+  position: absolute;
+  top: clamp(22px, 4vw, 48px);
+  left: clamp(22px, 4vw, 58px);
+  display: flex;
+  align-items: baseline;
+  gap: 0.9rem;
+  pointer-events: none;
+}
+
+.vehicle-demo__title h1 {
+  margin: 0;
+  font-size: clamp(1.4rem, 2.7vw, 2.55rem);
+  font-weight: 620;
+  letter-spacing: -0.045em;
+}
+
+.vehicle-demo__title p {
+  margin: 0;
+  padding-left: 0.9rem;
+  border-left: 1px solid #bbc6d3;
+  color: #78899d;
+  font-size: 0.8rem;
+  letter-spacing: 0.16em;
+}
+
+.vehicle-demo__panel {
+  position: absolute;
+  top: 50%;
+  right: clamp(22px, 4vw, 60px);
+  width: min(306px, calc(100% - 2rem));
+  transform: translateY(-50%);
+}
+
+.vehicle-demo__hud {
+  position: absolute;
+  bottom: clamp(20px, 5vh, 48px);
+  left: 38%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  white-space: nowrap;
+  padding: 0.37rem 0.45rem 0.37rem 0.8rem;
+  border: 1px solid #ffffffd9;
+  border-radius: 2rem;
+  background: #ffffffc7;
+  color: #718195;
+  box-shadow: 0 6px 25px #3048620c;
+  font-size: 0.76rem;
+  backdrop-filter: blur(12px);
+}
+
+.vehicle-demo__hud button {
+  padding: 0.3rem 0.6rem;
+  border: 1px solid #dee6ef;
+  border-radius: 1rem;
+  background: #f0f4f8;
+  color: #42617e;
+  font: inherit;
+  cursor: pointer;
+}
+
+.vehicle-demo__hud button:disabled { opacity: 0.45; cursor: default; }
+
+.vehicle-demo__credits {
+  position: absolute;
+  left: clamp(22px, 4vw, 58px);
+  bottom: 12px;
+  display: flex;
+  gap: 0.85rem;
+  font-size: 0.6rem;
+}
+
+.vehicle-demo__credits a { color: #91a0af; text-decoration: none; }
+.vehicle-demo__credits a:hover { color: #526c86; text-decoration: underline; }
+
+@media (max-width: 800px) {
+  .vehicle-demo__panel { top: auto; bottom: 1.2rem; right: 1rem; transform: none; }
+  .vehicle-demo__hud { left: 1rem; transform: none; }
+}
+
+@media (max-width: 560px) {
+  .vehicle-demo__hud { top: 4.5rem; bottom: auto; }
+  .vehicle-demo__panel { right: 1rem; left: 1rem; }
+  .vehicle-demo__panel .part-panel { margin-left: auto; }
+}
