@@ -1,8 +1,7 @@
 import './demo-video-panel.css';
 
 function demoVideoUrl(): string | null {
-  const configured = import.meta.env.VITE_DEMO_VIDEO_URL?.trim();
-  if (!configured) return null;
+  const configured = import.meta.env.VITE_DEMO_VIDEO_URL?.trim() || 'videos/demo.mp4';
   try {
     const url = new URL(configured, new URL(import.meta.env.BASE_URL, window.location.origin));
     return ['https:', 'http:'].includes(url.protocol) ? url.href : null;
@@ -18,11 +17,15 @@ export function DemoVideoPanel() {
         <h2>语音交互演示</h2>
         <span>本地完整版</span>
       </div>
-      <p>在线体验旋转、缩放与点击控车，完整语音交互将在视频中展示。</p>
+      <p>观看完整语音控车与多轮对话演示。</p>
       {inline ? (
-        <video className="demo-video-panel__video" src={url} controls preload="metadata" playsInline>
-          <a href={url}>观看语音演示视频</a>
-        </video>
+        <>
+          <video className="demo-video-panel__video" src={url} controls preload="metadata" playsInline
+            poster={new URL('../../docs/assets/showroom-preview.png', import.meta.url).href}>
+            <a href={url}>观看语音演示视频</a>
+          </video>
+          <a className="demo-video-panel__open" href={url} target="_blank" rel="noopener noreferrer">新窗口观看演示视频 ↗</a>
+        </>
       ) : url ? (
         <a className="demo-video-panel__link" href={url} target="_blank" rel="noopener noreferrer">
           <span aria-hidden="true">▶</span> 观看演示视频 ↗

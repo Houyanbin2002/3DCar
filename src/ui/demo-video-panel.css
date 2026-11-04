@@ -20,7 +20,10 @@
 .demo-video-panel__placeholder svg { width: 34px; height: 34px; flex-shrink: 0; stroke: #8ba4b8; stroke-width: 1.4; }
 .demo-video-panel__placeholder strong { display: block; font-size: 12px; font-weight: 500; color: #526c86; }
 .demo-video-panel__placeholder div > span { display: block; margin-top: 4px; font-size: 10px; color: #8496a9; }
-.demo-video-panel__video { display: block; width: 100%; margin-top: 10px; border-radius: 12px; background: #18232e; }
+.demo-video-panel__video { display: block; width: 100%; max-height: 132px; margin-top: 10px; border-radius: 12px; background: #18232e; object-fit: contain; }
+.demo-video-panel__open { display: inline-block; margin-top: 6px; color: #327b9c; font-size: 11px; text-decoration: none; }
+.demo-video-panel__open:hover { text-decoration: underline; }
+.demo-video-panel__open:focus-visible { outline: 2px solid #327b9c; outline-offset: 3px; }
 .demo-video-panel__link { color: #327b9c; font-size: 12px; text-decoration: none; border-style: solid; }
 .demo-video-panel__link:hover { background: rgb(218 237 250 / 65%); }
 .demo-video-panel__link:focus-visible { outline: 2px solid #327b9c; outline-offset: 3px; }

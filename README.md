@@ -14,13 +14,11 @@
 
 ## 演示视频
 
-> **视频位置已预留，待上传。**
->
-> 这里将展示唤醒控车、模糊需求澄清、多轮对话和连续车窗调整。在线展厅右侧也有视频展示区域。
+**[▶ 点击观看完整演示视频（3 分 22 秒）](https://houyanbin2002.github.io/3DCar/videos/demo.mp4)**
 
-<!-- 上传视频后，可在这里粘贴 GitHub 附件视频地址，或添加观看链接。 -->
+视频展示点击控车、语音指令与连续对话操作。[在线展厅](https://houyanbin2002.github.io/3DCar/)右侧也可直接播放，并支持全屏或在新窗口观看。
 
-发布视频只需设置仓库变量 **VITE_DEMO_VIDEO_URL** 并重新运行 Pages 工作流：MP4 / WebM / OGG 地址可在展厅内播放，B 站等视频页面链接以观看入口展示。操作步骤见 [发布与视频配置](docs/deployment.md)。
+原视频保存在 [public/videos/demo.mp4](public/videos/demo.mp4)，约 12.7 MB。默认使用仓库内的视频；如需替换为其他地址，可设置仓库变量 **VITE_DEMO_VIDEO_URL** 后重新发布。操作步骤见 [发布与视频配置](docs/deployment.md)。
 
 ## 当前功能
 

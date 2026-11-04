@@ -5,7 +5,7 @@
 - 仓库：[Houyanbin2002/3DCar](https://github.com/Houyanbin2002/3DCar)。
 - 在线展厅：<https://houyanbin2002.github.io/3DCar/>。
 - 线上仅发布静态 3D 展厅、点击控制和演示视频区域，不部署语音及模型接口，不请求麦克风。
-- 本地源码保留完整语音及模型功能。视频未上传时，页面显示「演示视频待上传」。
+- 本地源码保留完整语音及模型功能。完整演示视频已上传，页面可直接播放。
 
 ## 自动部署
 
@@ -16,14 +16,18 @@
 | Node.js | 22.x |
 | `PAGES_BASE` | `/3DCar/`，工作流根据仓库名生成 |
 | `VITE_DEMO_MODE` | `showcase` |
-| `VITE_DEMO_VIDEO_URL` | 可选的公开视频或视频页面地址 |
+| `VITE_DEMO_VIDEO_URL` | 可覆盖视频地址，未配置时使用 `videos/demo.mp4` |
 | 产物 | `dist/`，含 GLB、贴图及许可 |
 
 仓库 Settings → Pages 的发布来源设为 **GitHub Actions**。部署只使用仓库自带的短期令牌，不需要存放模型 Key。
 
-## 添加演示视频
+## 演示视频与后续替换
 
-README「演示视频」及展厅右侧都已留有位置，暂未提供实际视频文件。
+当前视频为 [public/videos/demo.mp4](../public/videos/demo.mp4)，原文件直接上传，H.264 / AAC 编码，2560×1230，时长约 3 分 22 秒，约 12.7 MB。README 有观看链接，展厅右侧有播放器和新窗口观看入口。
+
+可直接访问 <https://houyanbin2002.github.io/3DCar/videos/demo.mp4>。
+
+替换视频可直接更新仓库内文件，推送到 `main` 后自动发布；也可改用外部地址：
 
 1. 将视频上传到可公开访问的位置，例如 GitHub Issue / Release 附件或已有视频平台，无需将大视频加入 Git 历史。
 2. 打开仓库 **Settings → Secrets and variables → Actions → Variables**，新增仓库变量 `VITE_DEMO_VIDEO_URL`。
