@@ -168,6 +168,7 @@ test('等待唤醒时显示识别文字，无语音返回时保留麦克风提�
   const s = setup();
   s.input.say('', '这里有点声音');
   assert.equal(s.control.getSnapshot().transcript, '这里有点声音');
+  assert.match(s.control.getSnapshot().message, /已收到语音/u);
   assert.equal(s.calls.length, 0);
   assert.equal(s.intents.length, 0);
   s.input.error('no-speech');
@@ -175,7 +176,10 @@ test('等待唤醒时显示识别文字，无语音返回时保留麦克风提�
   s.clock.advance(300);
   assert.equal(s.control.getSnapshot().enabled, true);
   assert.equal(s.control.getSnapshot().phase, 'waiting');
-  assert.match(s.control.getSnapshot().message, /麦克风/u);
+  assert.match(s.control.getSnapshot().message, /尚未确认唤醒词/u);
+  s.input.say('', '小满同学打开左前窗');
+  assert.match(s.control.getSnapshot().message, /等待完整识别结果/u);
+  assert.equal(s.calls.length, 0);
   s.control.stop();
 });
 

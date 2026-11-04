@@ -202,7 +202,9 @@ export class VoiceControl {
     if (code === 'aborted') return;
     if (code === 'no-speech') {
       if (this.snapshot.phase === 'waiting') {
-        this.update({ message: '暂未识别到语音，请检查麦克风输入，再说“小满同学”。' });
+        this.update({ message: this.snapshot.transcript
+          ? '尚未确认唤醒词，请说“小满同学”，稍停顿后再说指令。'
+          : '暂未识别到语音，请检查麦克风输入，再说“小满同学”。' });
       }
       return;
     }
@@ -238,7 +240,7 @@ export class VoiceControl {
         this.wakeFragment = ['小满同', '小满', '小'].find((prefix) => normalized.endsWith(prefix)) ?? '';
         this.cancelTimer('fragment');
         if (this.wakeFragment) this.schedule('fragment', 2_000, () => { this.wakeFragment = ''; });
-        this.update({ transcript: text });
+        this.update({ transcript: text, message: '已收到语音，请说“小满同学”唤醒。' });
       } else if (this.snapshot.phase === 'listening') {
         this.appendCommand(text);
       } else if (this.snapshot.phase === 'confirming') {
@@ -253,7 +255,10 @@ export class VoiceControl {
     }
     this.hasInterim = Boolean(normalizeSpeech(update.interim));
     if (this.snapshot.phase === 'waiting' && this.hasInterim) {
-      this.update({ transcript: this.wakeFragment + update.interim });
+      const transcript = this.wakeFragment + update.interim;
+      this.update({ transcript, message: extractWakeCommand(transcript) !== null
+        ? '已听到“小满同学”，正在等待完整识别结果…'
+        : '已收到语音，正在识别唤醒词…' });
     }
     if (this.snapshot.phase === 'listening' && this.hasInterim) {
       this.cancelTimer('wake');
