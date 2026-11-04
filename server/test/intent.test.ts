@@ -284,3 +284,78 @@ test('rejects invalid runtime schemas before requesting the model', async () => 
     assert.equal(response.status, 400);
   }
 });
+
+const feedbackTools = ['first', 'second', 'third'].map((name) => ({ ...runtimeTool, function: { ...runtimeTool.function, name } }));
+const feedbackCalls = ['first', 'second', 'third'].map((name, index) => ({ id: `call-${index}`, name, arguments: { celsius: 24 } }));
+const firstExchange = {
+  calls: feedbackCalls,
+  results: feedbackCalls.map((call, index) => index === 1
+    ? { toolCallId: call.id, status: 'failed', message: '第二项暂忙。', effect: 'not_applied', error: { code: 'PART_BUSY', retryable: true }, actualState: { celsius: 20 } }
+    : { toolCallId: call.id, status: 'succeeded', message: '已完成。', effect: 'applied', actualState: { celsius: 24 } }),
+};
+
+function feedbackRequest(history: unknown = [firstExchange]) {
+  return request(JSON.stringify({ text: '完成三个独立动作', tools: feedbackTools, context: { temperature: 20 }, history }));
+}
+
+function retryResponse(name = 'second', celsius = 24, id = 'retry-second') {
+  return Response.json({ choices: [{ finish_reason: 'tool_calls', message: {
+    content: null, tool_calls: [{ id, type: 'function', function: { name, arguments: JSON.stringify({ celsius }) } }],
+  } }] });
+}
+
+test('returns every tool observation with its matching tool_call_id and only permits the failed operation', async () => {
+  const response = await handleIntent(feedbackRequest(), environment(), async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.messages[2].role, 'assistant');
+    assert.deepEqual(body.messages[2].tool_calls.map((call: { id: string }) => call.id), ['call-0', 'call-1', 'call-2']);
+    const observations = body.messages.filter((message: { role: string }) => message.role === 'tool');
+    assert.deepEqual(observations.map((message: { tool_call_id: string }) => message.tool_call_id), ['call-0', 'call-1', 'call-2']);
+    assert.deepEqual(observations.map((message: { content: string }) => JSON.parse(message.content).status), ['succeeded', 'failed', 'succeeded']);
+    assert.equal(JSON.parse(body.messages.at(-1).content).remainingRetries, 1);
+    assert.equal(body.tool_choice, 'auto');
+    assert.match(body.messages[0].content, /已成功动作必须保留/u);
+    return retryResponse();
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { toolCalls: [{ id: 'retry-second', name: 'second', arguments: { celsius: 24 } }], reply: '' });
+});
+
+test('rejects model plans that replay success, change failed arguments or reuse an earlier call ID', async () => {
+  for (const upstream of [retryResponse('first'), retryResponse('second', 25), retryResponse('second', 24, 'call-1')]) {
+    const response = await handleIntent(feedbackRequest(), environment(), async () => upstream);
+    assert.equal(response.status, 502);
+  }
+});
+
+test('after the retry attempt, disables further tool calls and forwards final failure state', async () => {
+  const secondExchange = {
+    calls: [{ id: 'retry-second', name: 'second', arguments: { celsius: 24 } }],
+    results: [{ toolCallId: 'retry-second', status: 'failed', message: '重试仍失败。', effect: 'not_applied', error: { code: 'PART_BUSY', retryable: false } }],
+  };
+  const history = [firstExchange, secondExchange];
+  const response = await handleIntent(feedbackRequest(history), environment(), async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.tool_choice, 'none');
+    assert.equal(JSON.parse(body.messages.at(-1).content).remainingRetries, 0);
+    assert.equal(body.messages.filter((item: { role: string }) => item.role === 'tool').length, 4);
+    return modelResponse('两项完成，第二项重试后仍失败。');
+  });
+  assert.equal(response.status, 200);
+  const rejected = await handleIntent(feedbackRequest(history), environment(), async () => retryResponse('second', 24, 'third-attempt'));
+  assert.equal(rejected.status, 502);
+});
+
+test('rejects missing, duplicated, mismatched or excessive tool observations before model invocation', async () => {
+  const invalidHistories = [
+    [], [firstExchange, firstExchange, firstExchange],
+    [{ ...firstExchange, results: firstExchange.results.slice(0, 2) }],
+    [{ ...firstExchange, results: [firstExchange.results[0], firstExchange.results[0], firstExchange.results[2]] }],
+    [{ ...firstExchange, results: firstExchange.results.map((result, index) => index === 1 ? { ...result, toolCallId: 'unknown' } : result) }],
+    [{ ...firstExchange, results: firstExchange.results.map((result, index) => index === 0 ? { ...result, error: { code: 'ERROR', retryable: true } } : result) }],
+  ];
+  for (const history of invalidHistories) {
+    const response = await handleIntent(feedbackRequest(history), environment(), unexpectedModelCall);
+    assert.equal(response.status, 400);
+  }
+});
