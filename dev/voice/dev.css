@@ -1,0 +1,18 @@
+html { color-scheme: dark; background: #111519; color: #e3e9ee; font-family: system-ui, "Microsoft YaHei", sans-serif; }
+body { margin: 0; }
+.voice-demo { max-width: 1060px; margin: 60px auto; padding: 24px; display: grid; grid-template-columns: 1fr 360px; gap: 64px; align-items: start; }
+.voice-demo h1 { font-size: 32px; margin: 8px 0 20px; }
+.voice-demo h2 { font-size: 17px; margin-top: 36px; }
+.voice-demo p { line-height: 1.8; color: #aab7c0; }
+.voice-demo__eyebrow { font-size: 12px; letter-spacing: 1px; }
+.voice-demo__settings { display: flex; gap: 24px; }
+.voice-demo__note { font-size: 12px; }
+.voice-demo textarea { display: block; width: 100%; box-sizing: border-box; margin: 8px 0; padding: 12px; font: inherit; border: 1px solid #3c4b56; border-radius: 10px; background: #1c242c; color: inherit; }
+.voice-demo button { padding: 8px 12px; margin: 4px 4px 4px 0; background: #202d35; border: 1px solid #405460; color: #c9e7ea; border-radius: 8px; cursor: pointer; }
+.voice-demo button:disabled { opacity: .4; cursor: default; }
+.voice-demo button:focus-visible, .voice-demo textarea:focus-visible { outline: 2px solid #64edf0; outline-offset: 3px; }
+.voice-demo__examples { margin-top: 14px; }
+.voice-demo__parts { display: grid; grid-template-columns: 1fr 1fr; padding: 0; gap: 8px 20px; list-style: none; }
+.voice-demo__parts li { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #28343c; font-size: 13px; }
+.voice-demo__parts strong { font-weight: 400; color: #78d7d6; }
+@media (max-width: 800px) { .voice-demo { grid-template-columns: 1fr; margin: 16px auto; gap: 30px; } }
