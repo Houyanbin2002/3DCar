@@ -2,7 +2,10 @@ import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 
 const result = await build({
-  entryPoints: [fileURLToPath(new URL('./voice.test.ts', import.meta.url))],
+  stdin: {
+    contents: "import './voice.test.ts'; import './toolCycle.test.ts';",
+    resolveDir: fileURLToPath(new URL('.', import.meta.url)),
+  },
   bundle: true,
   platform: 'node',
   format: 'esm',

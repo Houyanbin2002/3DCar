@@ -1,4 +1,4 @@
-import type { ControlResponse, ToolArguments, ToolCall, ToolDefinition } from '../../shared/control';
+import type { ControlResponse, ToolArguments, ToolCall, ToolDefinition, ToolEffect, ToolExecutionResult } from '../../shared/control';
 import { validControlResponse, validToolArguments, validToolDefinitions } from '../../shared/control';
 import { PART_IDS } from '../contracts/vehicle';
 import type { VehicleAction, VehicleController } from '../contracts/vehicle';
@@ -12,8 +12,16 @@ export interface PreparedTool {
 export interface RegisteredTool {
   definition: ToolDefinition;
   confirmation: 'always' | 'never';
+  idempotent?: boolean;
   context?(): unknown;
   prepare(args: ToolArguments): PreparedTool;
+}
+
+export class ToolExecutionError extends Error {
+  constructor(message: string, public readonly details: { code: string; retryable: boolean; effect: ToolEffect }) {
+    super(message);
+    this.name = 'ToolExecutionError';
+  }
 }
 
 export interface PreparedToolBatch {
@@ -54,14 +62,40 @@ export class ToolRegistry {
     return batch;
   }
 
-  async execute(batch: PreparedToolBatch, signal: AbortSignal, onResult: (message: string) => void): Promise<void> {
+  async execute(batch: PreparedToolBatch, signal: AbortSignal, onResult: (message: string) => void): Promise<ToolExecutionResult[]> {
+    const results: ToolExecutionResult[] = [];
     for (const { call, prepared, registered } of batch.tools) {
-      signal.throwIfAborted();
-      if (this.tools.get(call.name) !== registered || !validToolArguments(registered.definition, call.arguments)) throw new Error('Tool is no longer available');
-      const result = await prepared.execute(signal);
-      signal.throwIfAborted();
-      onResult(result);
+      let result: ToolExecutionResult;
+      if (signal.aborted) {
+        result = { toolCallId: call.id, status: 'not_run', message: `${prepared.label}未执行，已取消。`, effect: 'not_applied', error: { code: 'CANCELLED', retryable: false } };
+      } else if (this.tools.get(call.name) !== registered || !validToolArguments(registered.definition, call.arguments)) {
+        result = { toolCallId: call.id, status: 'not_run', message: `${prepared.label}未执行，工具已失效。`, effect: 'not_applied', error: { code: 'TOOL_UNAVAILABLE', retryable: false } };
+      } else {
+        try {
+          const message = await prepared.execute(signal);
+          result = { toolCallId: call.id, status: 'succeeded', message, effect: 'applied' };
+        } catch (cause) {
+          const details = cause instanceof ToolExecutionError ? cause.details
+            : { code: 'EXECUTION_ERROR', retryable: false, effect: 'unknown' as const };
+          result = {
+            toolCallId: call.id, status: 'failed', message: `${prepared.label}失败。${cause instanceof ToolExecutionError ? cause.message : '执行结果未确认。'}`,
+            effect: details.effect, error: { code: signal.aborted ? 'CANCELLED' : details.code, retryable: false },
+          };
+          let observed = false;
+          try {
+            if (registered.context) { result.actualState = structuredClone(registered.context()); observed = result.actualState !== undefined; }
+          } catch { /* A failed state read leaves the effect uncertain. */ }
+          result.error!.retryable = !signal.aborted && details.retryable
+            && (details.effect === 'not_applied' || (details.effect === 'unknown' && registered.idempotent === true && observed));
+        }
+      }
+      if (result.status === 'succeeded' && registered.context) {
+        try { result.actualState = structuredClone(registered.context()); } catch { /* Completion remains authoritative when state reads fail. */ }
+      }
+      results.push(result);
+      onResult(result.message);
     }
+    return results;
   }
 }
 
@@ -70,9 +104,10 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
   const prepareAction = (action: VehicleAction): PreparedTool => ({
     label: describeAction(action),
     async execute(signal) {
-      if (!controller.getSnapshot().ready) throw new Error('Vehicle is not ready');
+      if (!controller.getSnapshot().ready) throw new ToolExecutionError('车辆仍在加载。', { code: 'VEHICLE_NOT_READY', retryable: true, effect: 'not_applied' });
       const [result] = await controller.execute([action], { signal });
-      if (!result || result.outcome === 'failed' || result.outcome === 'cancelled') throw new Error('Vehicle action failed');
+      if (!result || result.outcome === 'failed') throw new ToolExecutionError('车辆未能完成动作。', { code: 'VEHICLE_ACTION_FAILED', retryable: true, effect: 'unknown' });
+      if (result.outcome === 'cancelled') throw new ToolExecutionError('动作已取消。', { code: 'CANCELLED', retryable: false, effect: 'not_applied' });
       return describeResult(result);
     },
   });
@@ -90,6 +125,7 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
       },
     },
     confirmation: 'always',
+    idempotent: true,
     context: () => controller.getSnapshot().parts,
     prepare: (args) => prepareAction({ kind: 'part', partId: args.partId as typeof PART_IDS[number], open: args.open as boolean }),
   });
@@ -105,6 +141,8 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
       },
     },
     confirmation: 'always',
+    idempotent: true,
+    context: () => controller.getSnapshot().parts,
     prepare: (args) => prepareAction({ kind: 'group', group: args.group as 'doors' | 'windows', open: args.open as boolean }),
   });
   registry.register({
@@ -116,6 +154,7 @@ export function createVehicleToolRegistry(controller: VehicleController): ToolRe
       },
     },
     confirmation: 'always',
+    idempotent: true,
     context: () => ({ running: controller.getSnapshot().engineRunning }),
     prepare: (args) => prepareAction({ kind: 'engine', running: args.running as boolean }),
   });

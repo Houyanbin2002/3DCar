@@ -5,7 +5,9 @@ import type { ControlClient } from './controlClient';
 import { describeAction, describeResult, extractWakeCommand, normalizeSpeech, routeCommand } from './parseCommand';
 import type { RoutedStep } from './parseCommand';
 import { createVehicleToolRegistry } from './toolRegistry';
-import type { PreparedToolBatch, ToolRegistry } from './toolRegistry';
+import type { ToolRegistry } from './toolRegistry';
+import { runToolCycle } from './runToolCycle';
+import type { ToolExecutionPlan } from './runToolCycle';
 import { createBrowserSpeechInput, createBrowserSpeechOutput } from './speechIO';
 import type { SpeechInput, SpeechOutput, TranscriptUpdate } from './speechIO';
 
@@ -68,7 +70,7 @@ export class VoiceControl {
   private speechActive = false;
   private hasInterim = false;
   private commandText = '';
-  private pendingTools: PreparedToolBatch | null = null;
+  private pendingTools: ToolExecutionPlan | null = null;
   private steps: RoutedStep[] = [];
   private abort = new AbortController();
   private snapshot: VoiceSnapshot;
@@ -294,21 +296,22 @@ export class VoiceControl {
     }
   }
 
-  private async executeToolBatch(batch: PreparedToolBatch): Promise<void> {
+  private async executeToolBatch(plan: ToolExecutionPlan): Promise<void> {
     const turn = this.turn;
-    this.update({ phase: 'executing', message: `正在${batch.tools[0].prepared.label}…` });
     try {
-      await this.tools.execute(batch, this.abort.signal, (message) => {
-        if (this.current(turn)) this.addFeedback(message);
+      await runToolCycle({
+        plan, registry: this.tools, client: this.controlClient, signal: this.abort.signal,
+        onMessage: (message) => { if (this.current(turn)) this.addFeedback(message); },
+        onPhase: (phase, message) => { if (this.current(turn)) this.update({ phase, message }); },
       });
     } catch {
       if (this.current(turn)) this.addFeedback('本次工具动作未能完成，请重新唤醒后重试。');
     }
   }
 
-  private async executeConfirmed(batch: PreparedToolBatch): Promise<void> {
+  private async executeConfirmed(plan: ToolExecutionPlan): Promise<void> {
     const turn = this.turn;
-    await this.executeToolBatch(batch);
+    await this.executeToolBatch(plan);
     if (this.current(turn)) await this.advance();
   }
 
@@ -316,15 +319,17 @@ export class VoiceControl {
     const turn = this.turn;
     this.update({ phase: 'thinking', message: '正在理解你的意思…' });
     try {
-      const response = await this.controlClient({ text, tools: this.tools.definitions(), context: this.tools.context() }, this.abort.signal);
+      const request = { text, tools: this.tools.definitions(), context: this.tools.context() };
+      const response = await this.controlClient(request, this.abort.signal);
       if (!this.current(turn)) return false;
       const batch = this.tools.prepare(response);
       if (!batch.tools.length) {
         this.addFeedback(`未执行车辆动作。${response.reply}`);
         return false;
       }
-      if (!batch.requiresConfirmation) { await this.executeToolBatch(batch); return false; }
-      this.pendingTools = batch;
+      const plan = { batch, request };
+      if (!batch.requiresConfirmation) { await this.executeToolBatch(plan); return false; }
+      this.pendingTools = plan;
       const question = `要我帮你${batch.tools.map(({ prepared }) => prepared.label).join('、')}吗？`;
       this.pauseInput();
       this.update({ phase: 'speaking', message: question });

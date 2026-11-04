@@ -13,7 +13,8 @@ import './dev.css';
 const vehicle = createSimulatedVehicle();
 const simulatedInput = new SimulatedInput();
 const simulatedOutput = { speak: async () => {} };
-const simulatedControl: ControlClient = async ({ text, context }) => {
+const simulatedControl: ControlClient = async ({ text, context, history }) => {
+  if (history) return { toolCalls: [], reply: '已核对本轮执行结果。' };
   if (!/闷|热|透气/u.test(text)) return { toolCalls: [], reply: '请补充动作和具体部件，例如打开左前窗。' };
   const parts = context.set_vehicle_part as Record<string, PartSnapshot>;
   const partId = WINDOW_IDS.find((id) => !parts[id].open && !parts[id].moving);

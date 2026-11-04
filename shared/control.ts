@@ -30,11 +30,91 @@ export interface ControlRequest {
   text: string;
   tools: ToolDefinition[];
   context: Record<string, unknown>;
+  history?: ToolExchange[];
 }
 
 export interface ControlResponse {
   toolCalls: ToolCall[];
   reply: string;
+}
+
+export type ToolEffect = 'applied' | 'not_applied' | 'unknown';
+
+export interface ToolExecutionResult {
+  toolCallId: string;
+  status: 'succeeded' | 'failed' | 'not_run';
+  message: string;
+  effect: ToolEffect;
+  error?: { code: string; retryable: boolean };
+  actualState?: unknown;
+}
+
+export interface ToolExchange {
+  calls: ToolCall[];
+  results: ToolExecutionResult[];
+}
+
+export function operationKey(call: ToolCall): string {
+  return JSON.stringify([call.name, Object.entries(call.arguments).sort(([left], [right]) => left.localeCompare(right))]);
+}
+
+export function retryableCalls(history: readonly ToolExchange[]): ToolCall[] {
+  if (history.length !== 1) return [];
+  const { calls, results } = history[0];
+  const succeeded = new Set(results.filter((result) => result.status === 'succeeded')
+    .map((result) => operationKey(calls.find((call) => call.id === result.toolCallId)!)));
+  return calls.filter((call) => {
+    const result = results.find((item) => item.toolCallId === call.id)!;
+    return result.status === 'failed' && result.error?.retryable === true && !succeeded.has(operationKey(call));
+  });
+}
+
+export function validRetryResponse(response: ControlResponse, history: readonly ToolExchange[]): boolean {
+  if (!response.toolCalls.length) return true;
+  const allowed = new Set(retryableCalls(history).map(operationKey));
+  const previousIds = new Set(history.flatMap((exchange) => exchange.calls.map((call) => call.id)));
+  const seen = new Set<string>();
+  return response.toolCalls.every((call) => {
+    const key = operationKey(call);
+    if (!allowed.has(key) || seen.has(key) || previousIds.has(call.id)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function validToolHistory(value: unknown, definitions: readonly ToolDefinition[]): value is ToolExchange[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 2) return false;
+  const previous: ToolExchange[] = [];
+  for (const exchange of value) {
+    if (!isRecord(exchange) || Object.keys(exchange).length !== 2 || !Array.isArray(exchange.results)
+      || !validControlResponse({ toolCalls: exchange.calls, reply: '' }, definitions)
+      || !Array.isArray(exchange.calls) || exchange.calls.length < 1 || exchange.calls.length !== exchange.results.length) return false;
+    const ids = new Set<string>();
+    for (const result of exchange.results) {
+      if (!isRecord(result) || Object.keys(result).some((key) => !['toolCallId', 'status', 'message', 'effect', 'error', 'actualState'].includes(key))
+        || typeof result.toolCallId !== 'string' || ids.has(result.toolCallId)
+        || !exchange.calls.some((call: ToolCall) => call.id === result.toolCallId)
+        || !['succeeded', 'failed', 'not_run'].includes(String(result.status))
+        || !['applied', 'not_applied', 'unknown'].includes(String(result.effect))
+        || typeof result.message !== 'string' || result.message.length > 1_000) return false;
+      ids.add(result.toolCallId);
+      if (result.status === 'succeeded') {
+        if (result.effect !== 'applied' || result.error !== undefined) return false;
+      } else {
+        if (!isRecord(result.error) || Object.keys(result.error).length !== 2
+          || typeof result.error.code !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/u.test(result.error.code)
+          || typeof result.error.retryable !== 'boolean') return false;
+        if (result.status === 'not_run' && (result.effect !== 'not_applied' || result.error.retryable)) return false;
+        if (result.effect === 'applied' && result.error.retryable) return false;
+        if (result.effect === 'unknown' && result.error.retryable && result.actualState === undefined) return false;
+        if (previous.length > 0 && result.error.retryable) return false;
+      }
+    }
+    const checked = exchange as unknown as ToolExchange;
+    if (previous.length && !validRetryResponse({ toolCalls: checked.calls, reply: '' }, previous)) return false;
+    previous.push(checked);
+  }
+  return true;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

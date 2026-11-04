@@ -11,7 +11,7 @@ import { createSimulatedVehicle } from '../../../dev/voice/mockVehicle';
 import type { VehicleAction } from '../../contracts/vehicle';
 import type { ControlClient } from '../controlClient';
 import { createControlClient } from '../controlClient';
-import { createVehicleToolRegistry } from '../toolRegistry';
+import { createVehicleToolRegistry, ToolExecutionError } from '../toolRegistry';
 import { routeCommand } from '../parseCommand';
 import type { ControlResponse, ToolCall } from '../../../shared/control';
 
@@ -70,6 +70,7 @@ function setup(overrides: { intent?: IntentClient; output?: SpeechOutput; contro
   const intent: IntentClient = overrides.intent ?? (async (text) => { intents.push(text); return { intent: 'ventilate' }; });
   const output: SpeechOutput = overrides.output ?? { speak: async (text) => { spoken.push(text); } };
   const controlClient: ControlClient = async (request, signal) => {
+    if (request.history) return { toolCalls: [], reply: '已核对本轮执行结果。' };
     const result = await intent(request.text, signal);
     const parsed = parseCommand(request.text);
     if (parsed.kind === 'clarify') return { toolCalls: [], reply: parsed.message };
@@ -484,6 +485,7 @@ test('规则置信级别由完整匹配判定，低置信度与未匹配送模�
 test('运行时注册温控工具后，下次请求自动包含定义并能执行', async () => {
   let temperature = 20;
   const s = setup({ control: async (request) => {
+    if (request.history) return { toolCalls: [], reply: '温度设置已完成。' };
     assert.ok(request.tools.some((tool) => tool.function.name === 'set_cabin_temperature'));
     assert.deepEqual(request.context.set_cabin_temperature, { celsius: 20 });
     return { toolCalls: [{ id: 'temperature-call', name: 'set_cabin_temperature', arguments: { celsius: 24 } }], reply: '' };
@@ -509,7 +511,7 @@ test('运行时注册温控工具后，下次请求自动包含定义并能执�
 });
 
 test('模型指定的任意已注册部件按顺序执行，无通风标签映射', async () => {
-  const s = setup({ control: async (): Promise<ControlResponse> => ({ toolCalls: [
+  const s = setup({ control: async (request): Promise<ControlResponse> => request.history ? { toolCalls: [], reply: '本轮动作已完成。' } : ({ toolCalls: [
     { id: 'first', name: 'set_vehicle_part', arguments: { partId: 'frunk', open: true } },
     { id: 'second', name: 'set_engine_state', arguments: { running: true } },
   ], reply: '' }) });
@@ -550,7 +552,8 @@ test('工具卸载后旧批次失效，新注册实例不能恢复旧批次', as
   const batch = registry.prepare({ toolCalls: [{ id: 'light', name: 'set_light', arguments: { on: true } }], reply: '' });
   unregister();
   registry.register(tool);
-  await assert.rejects(registry.execute(batch, new AbortController().signal, () => {}));
+  const results = await registry.execute(batch, new AbortController().signal, () => {});
+  assert.equal(results[0].status, 'not_run');
   assert.equal(executed, false);
 });
 
@@ -568,7 +571,8 @@ test('控制客户端发送运行时定义并拒绝未提供工具的响应', as
 });
 
 test('只读工具按登记策略直接执行，车辆动作仍由确认策略控制', async () => {
-  const s = setup({ control: async () => ({ toolCalls: [{ id: 'read-state', name: 'read_status', arguments: {} }], reply: '' }) });
+  const s = setup({ control: async (request) => request.history ? { toolCalls: [], reply: '状态读取已完成。' }
+    : { toolCalls: [{ id: 'read-state', name: 'read_status', arguments: {} }], reply: '' } });
   let readCount = 0;
   s.tools.register({
     definition: { type: 'function', function: {
@@ -584,5 +588,41 @@ test('只读工具按登记策略直接执行，车辆动作仍由确认策略�
   assert.equal(readCount, 1);
   assert.equal(s.control.getSnapshot().phase, 'waiting');
   assert.equal(s.spoken.length, 0);
+  s.control.stop();
+});
+
+test('语音确认一次后完成三项调用和失败项重试，最终恢复等待唤醒', async () => {
+  const names = ['demo_first', 'demo_second', 'demo_third'];
+  const attempts = [0, 0, 0];
+  const s = setup({ control: async (request) => {
+    if (!request.history) return { toolCalls: names.map((name, index) => ({ id: `initial-${index}`, name, arguments: { open: true } })), reply: '' };
+    if (request.history.length === 1) {
+      assert.deepEqual(request.history[0].results.map((result) => result.status), ['succeeded', 'failed', 'succeeded']);
+      return { toolCalls: [{ id: 'retry-second', name: names[1], arguments: { open: true } }], reply: '' };
+    }
+    return { toolCalls: [], reply: '三个测试模块均已完成。' };
+  } });
+  for (const [index, name] of names.entries()) {
+    s.tools.register({
+      definition: { type: 'function', function: { name, description: '独立测试模块', parameters: { type: 'object', additionalProperties: false, required: ['open'], properties: { open: { type: 'boolean' } } } } },
+      confirmation: 'always',
+      prepare: () => ({ label: `开启测试模块${index + 1}`, execute: async () => {
+        attempts[index]++;
+        if (index === 1 && attempts[index] === 1) throw new ToolExecutionError('暂时忙。', { code: 'PART_BUSY', retryable: true, effect: 'not_applied' });
+        return `测试模块${index + 1}已开启。`;
+      } }),
+    });
+  }
+  s.input.say('小满小满，请启动三个测试模块');
+  s.clock.advance(1_000);
+  await flush();
+  assert.deepEqual(attempts, [0, 0, 0]);
+  assert.equal(s.control.getSnapshot().phase, 'confirming');
+  s.control.confirm(true);
+  await flush();
+  assert.deepEqual(attempts, [1, 2, 1]);
+  assert.equal(s.spoken.length, 1);
+  assert.equal(s.control.getSnapshot().phase, 'waiting');
+  assert.ok(s.control.getSnapshot().feedback.some((message) => message.includes('最终完成3项，失败0项')));
   s.control.stop();
 });

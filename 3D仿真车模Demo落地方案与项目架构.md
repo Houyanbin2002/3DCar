@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 文档版本 | v1.3（运行时工具注册与 Function Calling） |
+| 文档版本 | v1.4（工具观察与有界重试） |
 | 日期 | 2026-11-04 |
-| 需求基线 | [3D 仿真车模交互 Demo 需求文档 v1.4](./3D仿真车模交互Demo需求文档.md) |
+| 需求基线 | [3D 仿真车模交互 Demo 需求文档 v1.5](./3D仿真车模交互Demo需求文档.md) |
 | 技术路线 | 独立项目复用 FormDrive 的 Tesla Model 3 资产和部件动画逻辑 |
 | 界面基线 | 全屏暗棚展厅、车身热点、半透明部件小窗、独立语音卡片 |
 | 发布目标 | GitHub Pages 项目站点与独立 HTTPS 模型接口，桌面 Chrome、Edge 为正式验收环境 |
@@ -39,6 +39,8 @@ flowchart LR
     I <-->|单轮文本与函数调用| L[云端大模型]
     I -->|校验后的函数调用| F[页面确认状态]
     F -->|确认后执行工具| G
+    G -->|逐项结果与实际状态| I
+    I -->|仅原失败项的一轮重试| G
     G -->|执行函数| C
     C --> T[Three.js 部件动画]
     T -->|动画到位| C
@@ -76,13 +78,14 @@ flowchart LR
 │  │  ├─ parseCommand.ts      # 本地指令解析与路由判定
 │  │  ├─ intentClient.ts      # HTTP 传输和旧分类契约兼容
 │  │  ├─ controlClient.ts     # 运行时工具请求与响应校验
-│  │  └─ toolRegistry.ts      # 工具注册、准备与执行
+│  │  ├─ toolRegistry.ts      # 工具注册、准备与逐项执行回执
+│  │  └─ runToolCycle.ts      # 结果回传、失败项重试与最终汇总
 │  └─ ui/
 │     ├─ PartPanel.tsx
 │     ├─ VoicePanel.tsx
 │     └─ showroom.css
 ├─ shared/intent.ts            # 前后端共用的模型接口契约
-├─ shared/control.ts           # 函数工具定义、调用与参数校验
+├─ shared/control.ts           # 工具定义、调用、回执与重试约束
 ├─ server/                     # 模型接口，独立部署
 │  └─ intent.ts                # 请求校验、限流与模型调用
 └─ .github/workflows/pages.yml
@@ -133,13 +136,21 @@ flowchart LR
 4. **执行或撤销。** 首版模型调用的车辆变更统一确认后执行，本地明确规则动作直接执行。新工具可声明只读且无需确认。一次回复最多 8 个函数调用，按顺序执行。取消、超时、关闭语音或重新唤醒时清除旧建议和剩余步骤。退出本轮时中止请求并忽略旧回调。
 5. **扩展。** `ToolRegistry.register()` 登记定义、状态读取、确认策略和执行方法，返回注销方法。下次模型请求读取最新注册表。新增工具的接线示例见[工具扩展说明](./src/voice/TOOLS.md)。
 
+### 4.3 工具结果与有界 ReAct
+
+执行器为每条调用生成 `toolCallId`、`status`、`effect`、`message`，失败时增加错误码与重试资格，并尽量读取实际状态。同批仅允许独立动作，单项失败后继续处理其余独立项。`runToolCycle()` 将所有回执和原调用作为 `history` 发回接口，后端构造原 `assistant.tool_calls` 和逐条带 `tool_call_id` 的 `role: tool` 消息，再请模型判断。
+
+自动重试上限为一轮，仅允许初次失败且可恢复的同名、同参数操作，必须使用新调用 ID。前后端均拦截重放成功项、换对象、改参数或超限重试。重试绑定原工具实例及已确认计划，注销工具后旧计划失效。结果不确定时，仅已声明幂等且读回状态的工具可以标记可重试。取消和不可恢复错误禁止重试。
+
+重试后再回传结果并强制 `tool_choice: none` 生成最终说明；全部成功时同样反馈结果并禁止追加动作。包含初次规划最多请求模型 3 次，分别计入接口配额。复核超时或限流时保留执行结果，页面从回执计算最终数量。详细接入契约及错误示例见[工具扩展说明](./src/voice/TOOLS.md)。
+
 ## 5. 独立模型接口与部署边界
 
 GitHub Pages 发布车模与前端。前端用 `VITE_INTENT_API_URL` 配置独立 HTTPS 接口地址。兜底模型选用阿里云 `qwen3.8-omni-flash`，完整模型地址、名称和 `MODEL_API_KEY` 由后端运行时配置。密钥本地保存在 Git 忽略的 env 文件，线上使用部署平台的 Secret。[GitHub Pages 托管说明](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages) · [Vite 环境变量说明](https://vite.dev/guide/env-and-mode#env-variables) · [服务端 Secret 配置示例](https://developers.cloudflare.com/workers/configuration/secrets/)
 
 | 接口约定 | 说明 |
 | --- | --- |
-| `POST /api/intent` | 新链路接收 `text`、`tools`、`context`，受 `shared/control.ts` 约束。旧的单字段文本请求继续支持原分类契约。 |
+| `POST /api/intent` | 新链路接收 `text`、`tools`、`context`，结果回传时附带最多两轮 `history`，受 `shared/control.ts` 约束。旧的单字段文本请求继续支持原分类契约。 |
 | 支持的响应 | 新链路返回 `toolCalls` 和 `reply`。工具调用含 `id`、`name`、`arguments`，由实际登记的执行函数处理。无工具调用时显示模型追问。 |
 | 失败处理 | 输入不符合约定返回 4xx，限流返回 429，上游失败返回 5xx。前端设定有限等待时间，并将失败统一转为简短的具体指令提示。 |
 
@@ -158,4 +169,4 @@ GitHub Pages 发布车模与前端。前端用 `VITE_INTENT_API_URL` 配置独�
 
 构建时使用锁文件安装依赖。项目站点构建环境通过 `PAGES_BASE=/<仓库名>/` 设置 Vite `base`。GLB、贴图等资源引用遵循这个基路径，由 Actions 构建并发布 `dist/`。模型加载显示进度或等待提示，失败时提供重试。先以原始 GLB 测量真实网络下的冷启动，再决定是否需要压缩。若更换或压缩资产，重新验证节点命名、玻璃材质和全部部件动作。[Vite 的 GitHub Pages 部署指南](https://vite.dev/guide/static-deploy.html#github-pages)
 
-发布验收以 v1.4 的 A01–A17 为准。A01–A10 覆盖基础交付，A11–A15 覆盖智能语音和独立接口，A16–A17 验证模型直接选择函数及运行时工具扩展。实际车模与麦克风的联动在集成环境验证。
+发布验收以 v1.5 的 A01–A19 为准。A01–A10 覆盖基础交付，A11–A15 覆盖智能语音和独立接口，A16–A17 验证模型直接选择函数及运行时工具扩展，A18–A19 验证部分成功、失败项重试与取消。实际车模与麦克风的联动在集成环境验证。
