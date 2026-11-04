@@ -27,8 +27,10 @@ export function VehicleShowroom() {
         <h1>Tesla Model 3</h1>
         <p>3D 交互展厅</p>
       </header>
-      <div className="vehicle-demo__panel"><PartPanel controller={controller} /></div>
-      <div className="vehicle-demo__voice"><VoicePanel controller={controller} /></div>
+      <aside className="vehicle-demo__controls" aria-label="车辆与语音控制">
+        <PartPanel controller={controller} />
+        <VoicePanel controller={controller} />
+      </aside>
       <div className="vehicle-demo__hud">
         <span>拖动旋转 <span aria-hidden="true">·</span> 滚轮缩放</span>
         <button type="button" disabled={!ready} onClick={() => driver.current?.resetView()}>

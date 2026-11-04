@@ -113,8 +113,8 @@ try {
     'document.querySelector(' + part(id) + ')?.dataset.open==="' + open
     + '" && document.querySelector(' + part(id) + ').dataset.moving==="false"',
   ));
-  const groupSettled = (open) => waitFor(() => evaluate(
-    'document.querySelectorAll("[data-part][data-open=' + open + '][data-moving=false]").length===4',
+  const groupSettled = (section, open) => waitFor(() => evaluate(
+    'document.querySelectorAll("[data-section=' + section + '] [data-part][data-open=' + open + '][data-moving=false]").length===4',
   ));
   const markers = () => evaluate(
     'Array.from(document.querySelectorAll("[data-hotspot]")).filter(b=>getComputedStyle(b).visibility==="visible")'
@@ -134,15 +134,19 @@ try {
   });
   await waitFor(() => evaluate('document.querySelector("[data-scene-ready]")?.dataset.sceneReady==="true"'));
   await waitFor(async () => (await markers()).length >= 4);
+  assert.equal(await evaluate('document.querySelectorAll(".vehicle-demo__controls [data-section]").length'), 3);
+  assert.equal(await evaluate('document.querySelectorAll(".vehicle-demo__controls [data-part]").length'), 10);
+  assert.equal(await evaluate('document.querySelector(".vehicle-demo__controls").contains(document.querySelector(".voice-panel"))'), true);
+  assert.equal(await evaluate('document.querySelector(".vehicle-demo__controls").innerText.includes("已升起")'), false);
+  assert.equal(await evaluate('document.querySelectorAll("[data-section]").length === 3 && document.querySelector(".vehicle-demo__controls").scrollHeight <= document.querySelector(".vehicle-demo__controls").clientHeight + 1'), true);
   const initial = await markers();
   await screenshot('preview');
 
-  for (const [group, ids] of [
-    ['车窗', ['frontLeftWindow', 'frontRightWindow', 'rearLeftWindow', 'rearRightWindow']],
-    ['车门', ['frontLeftDoor', 'frontRightDoor', 'rearLeftDoor', 'rearRightDoor']],
-    ['备箱', ['frunk', 'trunk']],
+  for (const ids of [
+    ['frontLeftWindow', 'frontRightWindow', 'rearLeftWindow', 'rearRightWindow'],
+    ['frontLeftDoor', 'frontRightDoor', 'rearLeftDoor', 'rearRightDoor'],
+    ['frunk', 'trunk'],
   ]) {
-    await choose(group);
     for (const id of ids) {
       await switchPart(id);
       await settled(id, true);
@@ -154,7 +158,6 @@ try {
   }
   console.log('PASS all ten parts independently opened and closed');
 
-  await choose('车窗');
   const lowerButton = await windowPoint('lower');
   const raiseButton = await windowPoint('raise');
   await click(lowerButton.x, lowerButton.y);
@@ -194,34 +197,29 @@ try {
   assert.equal(await evaluate('Number(document.querySelector("[data-part=frontLeftWindow]").dataset.openness)'), 0);
   console.log('PASS both window directions tap to endpoint, hold to move slowly, release to stop, reverse mid-motion and independent wiper parking');
 
-  await choose('车门');
   await switchPart('frontLeftDoor');
   await settled('frontLeftDoor', true);
-  await choose('车窗');
   await switchPart('frontLeftWindow');
   await settled('frontLeftWindow', true);
   const windowMarker = await waitFor(async () => (await markers()).find(([id]) => id === 'frontLeftWindow'));
   await screenshot('open-window');
   await click(windowMarker[1], windowMarker[2]);
   await settled('frontLeftWindow', false);
-  await choose('车门');
   await settled('frontLeftDoor', true);
   await switchPart('frontLeftDoor');
   await settled('frontLeftDoor', false);
   console.log('PASS lowered window raised through its hotspot while the door stayed open');
 
   await choose('全部打开');
-  await groupSettled(true);
+  await groupSettled('doors', true);
   await choose('全部关闭');
-  await groupSettled(false);
-  await choose('车窗');
+  await groupSettled('doors', false);
   await choose('全部降下');
-  await groupSettled(true);
+  await groupSettled('windows', true);
   await choose('全部升起');
-  await groupSettled(false);
+  await groupSettled('windows', false);
   console.log('PASS batch doors and windows');
 
-  await choose('车门');
   await click(100, 155);
   assert.ok(await allClosed());
   await drag(540, 470, 720, 500, true);
@@ -232,8 +230,7 @@ try {
   await waitFor(async () => JSON.stringify(await markers()) === JSON.stringify(initial));
   console.log('PASS blank click, drag-release protection, wheel zoom and camera reset');
 
-  for (const [group, id] of [['车门', 'frontLeftDoor'], ['车窗', 'frontLeftWindow'], ['备箱', 'frunk']]) {
-    await choose(group);
+  for (const id of ['frontLeftDoor', 'frontLeftWindow', 'frunk']) {
     const marker = (await markers()).find(([partId]) => partId === id);
     assert.ok(marker, 'Visible picking point for ' + id);
     const selector = JSON.stringify('[data-hotspot="' + id + '"]');
