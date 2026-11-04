@@ -8,10 +8,12 @@
 
 ```powershell
 npm ci
-Copy-Item .dev.vars.example .dev.vars
+Copy-Item .env.example .env.local
 ```
 
-在 `.dev.vars` 填写模型服务商提供的完整 `MODEL_API_URL`、`MODEL_NAME` 和 `MODEL_API_KEY`，然后运行 `npm run dev`。默认监听 `http://127.0.0.1:8787`。本地配额状态保存在被 Git 忽略的 `.wrangler/` 中。
+在 `.env.local` 填写 `MODEL_API_KEY`，然后运行 `npm run dev`。当前选定的兜底模型为 `qwen3.8-omni-flash`，示例使用阿里云北京地域的兼容 HTTP 地址。其他地域使用对应地域和工作空间的完整地址，Key 与地址需匹配。默认监听 `http://127.0.0.1:8787`。本地配额状态保存在被 Git 忽略的 `.wrangler/` 中。
+
+Wrangler 也支持原有 `.dev.vars` 配置。该文件存在时会优先读取它，使用 `.env.local` 时应避免同时保留另一份实际配置。[本地环境变量说明](https://developers.cloudflare.com/workers/configuration/environment-variables/)
 
 ```powershell
 $requestBody = @{ text = '车里有点闷热' } | ConvertTo-Json
@@ -28,14 +30,16 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8787/api/intent' `
 | 配置 | 用途与默认值 |
 | --- | --- |
 | `MODEL_API_URL` | 服务商的完整 HTTPS Chat Completions 地址。接口使用 Bearer 鉴权和 JSON 输出，要求返回 `choices[0].message.content` 与 `finish_reason: "stop"`。 |
-| `MODEL_NAME` | 与接口和 Key 相匹配的模型标识。选用支持 `response_format: json_object`、`max_tokens` 和非流式响应的聊天模型。 |
-| `MODEL_API_KEY` | 部署平台 Secret。本地使用 `.dev.vars`，生产环境使用 Wrangler Secret。 |
+| `MODEL_NAME` | 本项目选用 `qwen3.8-omni-flash`。服务端对该模型附加 `modalities: ["text"]` 与 `reasoning_effort: "none"`，用于低延迟的单轮意图判定。 |
+| `MODEL_API_KEY` | 部署平台 Secret。本地使用被 Git 忽略的 `.env.local`，生产环境使用 Wrangler Secret。 |
 | `ALLOWED_ORIGINS` | 逗号分隔的完整来源。默认配置只列出两个本地开发来源。发布时配置实际的 `https://用户名.github.io`，按需要保留开发来源。 |
 | `CLIENT_REQUESTS_PER_MINUTE` | 每客户端每 60 秒可预留的请求数，默认 5，范围 1–1000。 |
 | `DAILY_REQUEST_LIMIT` | 全站每 UTC 日可预留的请求数，默认 100，范围 1–10000。 |
 | `MODEL_TIMEOUT_MS` | 上游请求与响应读取的总等待上限，默认 8000 ms，范围 1–30000 ms。 |
 
 模型调用失败和超时也计入已预留次数。配额在 Durable Object 的事务中更新，并跨实例重启保留。持久状态仅包含当日用量、客户端当日哈希与窗口计数。请求次数字段和固定文本、输出上限共同约束演示用量。
+
+Qwen Omni 的文本输出、JSON 模式及思考参数依据阿里云官方说明。模型输出仍须通过两种意图的严格校验，再交由页面发起确认。[Qwen Omni 文档](https://help.aliyun.com/en/model-studio/qwen-omni)
 
 ## 独立发布与前端接入
 

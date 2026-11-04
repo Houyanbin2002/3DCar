@@ -158,7 +158,7 @@ export async function handleIntent(
     const upstream = await modelFetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${environment.MODEL_API_KEY}` },
-      redirect: 'error',
+      redirect: 'manual',
       signal: modelDeadline.signal,
       body: JSON.stringify({
         model: environment.MODEL_NAME,
@@ -167,6 +167,9 @@ export async function handleIntent(
         max_tokens: 64,
         temperature: 0,
         stream: false,
+        ...(environment.MODEL_NAME === 'qwen3.8-omni-flash'
+          ? { modalities: ['text'], reasoning_effort: 'none' }
+          : {}),
       }),
     });
     if (!upstream.ok) {

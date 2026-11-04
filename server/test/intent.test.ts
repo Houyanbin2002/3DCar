@@ -39,7 +39,7 @@ test('passes only final text to the configured model and returns both allowed in
       calls += 1;
       assert.equal(String(url), 'https://model.example/v1/chat/completions');
       assert.equal(new Headers(init?.headers).get('Authorization'), 'Bearer test-only-secret');
-      assert.equal(init?.redirect, 'error');
+      assert.equal(init?.redirect, 'manual');
       const body = JSON.parse(String(init?.body));
       assert.equal(body.messages[1].role, 'user');
       assert.equal(body.messages[1].content, '想透透气');
@@ -55,6 +55,21 @@ test('passes only final text to the configured model and returns both allowed in
     assert.equal(response.headers.get('Cache-Control'), 'no-store');
     assert.equal(calls, 1);
   }
+});
+
+test('Qwen Omni fallback requests text JSON with thinking disabled', async () => {
+  const response = await handleIntent(request(), environment({ MODEL_NAME: 'qwen3.8-omni-flash' }), async (_url, init) => {
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.model, 'qwen3.8-omni-flash');
+    assert.equal(body.reasoning_effort, 'none');
+    assert.deepEqual(body.modalities, ['text']);
+    assert.deepEqual(body.response_format, { type: 'json_object' });
+    assert.equal(body.max_tokens, 64);
+    assert.equal(body.stream, false);
+    return modelResponse('{"intent":"ventilate"}');
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { intent: 'ventilate' });
 });
 
 test('rejects malformed or ambiguous request objects before quota and model calls', async () => {
@@ -196,6 +211,18 @@ test('maps upstream errors and timeouts without exposing credentials or provider
   }));
   assert.equal(timeout.status, 504);
   assert.deepEqual(await timeout.json(), { error: { code: 'MODEL_TIMEOUT' } });
+});
+
+test('rejects provider redirects without forwarding the API key to a redirect destination', async () => {
+  let calls = 0;
+  const response = await handleIntent(request(), environment(), async (_url, init) => {
+    calls += 1;
+    assert.equal(init?.redirect, 'manual');
+    return new Response(null, { status: 302, headers: { Location: 'https://other.example/model' } });
+  });
+  assert.equal(response.status, 502);
+  assert.equal(calls, 1);
+  assert.deepEqual(await response.json(), { error: { code: 'MODEL_UNAVAILABLE' } });
 });
 
 test('deadline covers a stalled model response stream', async () => {
